@@ -1,0 +1,10 @@
+fastapi
+uvicorn[standard]
+pymupdf
+httpx
+numpy
+playwright
+python-multipart
+anthropic
+beautifulsoup4
+python-docx

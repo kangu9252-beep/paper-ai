@@ -1,0 +1,1266 @@
+// 논문 AI — 화면 동작
+const $ = (s, el = document) => el.querySelector(s);
+const $$ = (s, el = document) => [...el.querySelectorAll(s)];
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+// 인용 표기 인식: (저자, 2020) · (저자, 2020; 저자2 외, 2019) · (Smith, 2019, p. 3) · 저자(2020) · Neff et al.(2003)
+const YR = "(?:19|20)\\d{2}[a-z]?";
+const PAREN_RE = new RegExp(`\\(([^()]*?${YR}[^()]*?)\\)`, "g");
+const PART_RE = new RegExp(`^\\s*([^,;()\\d][^;()]*?),?\\s+(${YR})(?:\\s*,\\s*pp?\\.\\s*[\\d\\-–]+)?\\s*$`);
+const NARR_RE = new RegExp(`((?<![가-힣A-Za-z0-9])[가-힣]{2,4}(?:\\s?외)?|[A-Z][A-Za-z\\-']+(?:\\s(?:et al\\.|&\\s[A-Z][A-Za-z\\-']+|and\\s[A-Z][A-Za-z\\-']+))?)\\s?\\((${YR})\\)`, "g");
+const CITE_RE = new RegExp(`\\([^()]*?${YR}[^()]*?\\)`, "g"); // 문장에서 인용 표기 지우기용
+
+// 텍스트 안의 인용 표기 위치들: [{index, length, parts: [표기...], group}]
+function findCites(text) {
+  const out = [];
+  for (const m of text.matchAll(PAREN_RE)) {
+    const parts = m[1].split(";");
+    if (!parts.every((x) => PART_RE.test(x))) continue;
+    out.push({ index: m.index, length: m[0].length, parts: parts.length > 1 ? parts.map((x) => x.trim()) : [m[0]], group: parts.length > 1 });
+  }
+  for (const m of text.matchAll(NARR_RE)) {
+    if (out.some((o) => m.index < o.index + o.length && o.index < m.index + m[0].length)) continue;
+    out.push({ index: m.index, length: m[0].length, parts: [m[0]], group: false });
+  }
+  return out.sort((a, b) => a.index - b.index);
+}
+
+const S = { projects: [], cur: null, tab: "plan", status: null, routeSel: 0 };
+
+async function api(path, opts = {}) {
+  const o = { ...opts };
+  if (o.json !== undefined) {
+    o.method = o.method || "POST";
+    o.headers = { "Content-Type": "application/json" };
+    o.body = JSON.stringify(o.json);
+    delete o.json;
+  }
+  let r;
+  try {
+    r = await fetch(path, o);
+  } catch {
+    throw new Error("앱이 꺼져 있어요. 바탕화면 '논문 AI' 아이콘으로 다시 켠 뒤 이 페이지를 새로고침(F5) 해주세요.");
+  }
+  if (!r.ok) {
+    let msg = r.statusText;
+    try { msg = (await r.json()).detail || msg; } catch {}
+    throw new Error(msg);
+  }
+  return r.json();
+}
+
+function toast(msg, ms = 2600) {
+  const t = $("#toast");
+  t.textContent = msg;
+  t.classList.add("show");
+  clearTimeout(toast._t);
+  toast._t = setTimeout(() => t.classList.remove("show"), ms);
+}
+
+// ---------- 백그라운드 작업 표시 ----------
+function runJob(id, title, { onEmit, onDone, logEl, onLog } = {}) {
+  const card = document.createElement("div");
+  card.className = "job";
+  card.innerHTML = `<div class="h"><span class="spin"></span><span class="grow">${esc(title)}</span><button class="icon" title="중지">■</button></div><div class="l">시작…</div>`;
+  $("#jobs").appendChild(card);
+  $("button", card).onclick = () => api(`/api/jobs/${id}/stop`, { method: "POST" });
+  let emitted = 0;
+  return new Promise((resolve) => {
+    const tick = async () => {
+      let j;
+      try { j = await api(`/api/jobs/${id}`); } catch { setTimeout(tick, 2000); return; }
+      const last = j.log[j.log.length - 1] || "";
+      $(".l", card).textContent = last;
+      const le = logEl && document.getElementById(logEl);
+      if (le) { le.textContent = j.log.join("\n"); le.scrollTop = le.scrollHeight; }
+      onLog && onLog(last, j);
+      while (onEmit && emitted < j.emitted.length) onEmit(j.emitted[emitted++]);
+      if (j.status === "running") { setTimeout(tick, 1000); return; }
+      $(".spin", card).remove();
+      $(".h", card).insertAdjacentHTML("afterbegin", j.status === "done" ? "✅" : j.status === "error" ? "⚠️" : "⏹");
+      setTimeout(() => card.remove(), j.status === "error" ? 9000 : 4000);
+      refreshStatus();
+      onDone && onDone(j.result, j);
+      resolve(j);
+    };
+    tick();
+  });
+}
+
+// ---------- 상태 ----------
+async function refreshStatus() {
+  const el = $("#status");
+  try {
+    const s = await api("/api/status");
+    S.status = s;
+    if (!s.models) {
+      el.className = "status bad";
+      el.textContent = "로컬 AI(Ollama)가 꺼져 있어요";
+    } else if (!s.models.includes(s.settings.model)) {
+      el.className = "status bad";
+      el.textContent = `모델 ${s.settings.model} 없음 — 설정 확인`;
+    } else {
+      el.className = "status ok";
+      el.textContent = `로컬 AI 연결됨 · 내 자료 ${s.papers}편`;
+    }
+  } catch {
+    el.className = "status bad";
+    el.textContent = "앱이 꺼져 있어요 — 아이콘으로 다시 켜주세요";
+  }
+}
+
+// ---------- 프로젝트 목록 ----------
+async function loadProjects() {
+  S.projects = await api("/api/projects");
+  $("#projectList").innerHTML = S.projects
+    .map((p) => `<div class="proj ${S.cur && S.cur.id === p.id ? "active" : ""}" data-id="${p.id}">${esc(p.title)}<small>${esc(p.updated)}</small></div>`)
+    .join("");
+  $$(".proj").forEach((d) => (d.onclick = () => openProject(+d.dataset.id)));
+}
+
+async function createProject(topic, idea = "") {
+  topic = topic.trim();
+  if (!topic) return toast("주제를 적어주세요");
+  const { id } = await api("/api/projects", { json: { topic } });
+  await openProject(id);
+  startPlan(idea);
+}
+
+async function openProject(id, tab) {
+  S.cur = await api(`/api/projects/${id}`);
+  S.routeSel = S.cur.route || 0;
+  S.tab = tab || (S.cur.content ? "write" : S.cur.plan ? "plan" : "plan");
+  loadProjects();
+  renderProject();
+}
+
+function showWelcome() {
+  S.cur = null;
+  loadProjects();
+  $("#main").innerHTML = $("#tpl-welcome").innerHTML;
+  $("#welcomeGo").onclick = () => createProject($("#welcomeTopic").value, $("#welcomeIdea").value);
+  $("#wImpFile").onclick = () => $("#wImpInput").click();
+  const done = async (fd) => {
+    const { id } = await api("/api/import", { method: "POST", body: fd });
+    await openProject(id, "review");
+    toast("원고를 불러왔어요. 점검할 항목을 골라 실행하세요.");
+  };
+  $("#wImpInput").onchange = (e) => { const fd = new FormData(); fd.append("file", e.target.files[0]); done(fd); };
+  $("#wImpPasteBtn").onclick = () => { $("#wImpPaste").style.display = "block"; $("#wImpText").focus(); };
+  $("#wImpGo").onclick = () => {
+    const t = $("#wImpText").value.trim();
+    if (!t) return toast("원고를 붙여넣어 주세요");
+    const fd = new FormData();
+    fd.append("text", t);
+    done(fd);
+  };
+}
+
+function renderProject() {
+  const p = S.cur;
+  $("#main").innerHTML = `
+    <div class="tabs">
+      <div class="ptitle" title="눌러서 제목 바꾸기">${esc(p.title)}</div>
+      <button class="tab" data-tab="plan">① 연구계획</button>
+      <button class="tab" data-tab="collect">② 자료수집</button>
+      <button class="tab" data-tab="write">③ 집필</button>
+      <button class="tab" data-tab="review">④ 원고 점검</button>
+      <span class="grow"></span>
+      <span class="badge ${p.engine === "claude" ? "" : "gray"}" title="이 프로젝트에서 쓰는 AI">${p.engine === "claude" ? "Claude" : "로컬 AI"}</span>
+      <button class="ghost small" id="delProj">삭제</button>
+    </div>
+    <div id="tabBody"></div>`;
+  $$(".tab").forEach((b) => {
+    b.classList.toggle("active", b.dataset.tab === S.tab);
+    b.onclick = () => { saveNow(); S.tab = b.dataset.tab; renderProject(); };
+  });
+  $(".ptitle").onclick = async () => {
+    const t = prompt("논문 제목", p.title);
+    if (t) { await api(`/api/projects/${p.id}`, { method: "PUT", json: { title: t } }); p.title = t; renderProject(); loadProjects(); }
+  };
+  $("#delProj").onclick = async () => {
+    if (!confirm(`'${p.title}' 프로젝트를 삭제할까요? (내려받은 PDF는 그대로 남습니다)`)) return;
+    await api(`/api/projects/${p.id}`, { method: "DELETE" });
+    showWelcome();
+  };
+  ({ plan: renderPlan, collect: renderCollect, write: renderWrite, review: renderReview })[S.tab]();
+}
+
+// ---------- ① 연구계획 ----------
+let planJob = {};
+function startPlan(idea = "") {
+  const id = S.cur.id;
+  api(`/api/projects/${id}/plan`, { json: { idea } }).then(({ job }) => {
+    planJob[id] = job;
+    if (S.cur && S.cur.id === id) renderPlan();
+    runJob(job, "연구계획 세우는 중", {
+      logEl: "planLog",
+      onDone: async (r, j) => {
+        delete planJob[id];
+        if (S.cur && S.cur.id === id) {
+          S.cur = await api(`/api/projects/${id}`);
+          S.routeSel = S.cur.route || 0;
+          if (S.tab === "plan") renderPlan();
+        }
+        if (j.status === "done") toast("연구계획이 완성됐어요. 경로를 골라 승인해 주세요.");
+      },
+    });
+  });
+}
+
+function litCite(w) {
+  const sur = (a) => (/[가-힣]/.test(a) ? a.replace(/\s/g, "") : a.split(/\s+/).pop());
+  const a = w.authors || [];
+  const name = !a.length ? "저자미상" : a.length === 1 ? sur(a[0]) : a.length === 2 ? `${sur(a[0])} & ${sur(a[1])}` : `${sur(a[0])} 외`;
+  return `${name}, ${w.year || "연도미상"}`;
+}
+
+// AI 요약 속 [번호]를 (저자, 연도)로 바꾸고, 누르면 아래 선행연구 목록의 해당 논문으로 이동
+function refLinks(text, lit) {
+  return esc(text)
+    .replace(/\[(\d{1,3})\](?:\s*(?:와|과|,|및)\s*(?=\[))?/g, (m, n) => {
+      const w = lit[+n - 1];
+      if (!w) return `<span class="ref bad" title="AI가 목록에 없는 번호를 썼어요 — 믿지 마세요">[${n}?]</span>`;
+      return `<span class="ref" data-lit="${+n - 1}" title="${esc(w.title)}">(${esc(litCite(w))})</span>` + (m.length > `[${n}]`.length ? " " : "");
+    });
+}
+
+function renderPlan() {
+  const p = S.cur;
+  const body = $("#tabBody");
+  if (planJob[p.id] || !p.plan) {
+    body.innerHTML = `<div class="pad">
+      <div class="card"><h3>논문 주제</h3>
+        <textarea id="topic" rows="3">${esc(p.topic)}</textarea>
+        <h3 style="margin-top:12px">생각해 둔 연구 방향 <span class="muted small">(선택 — 적으면 AI 추천과 함께 정리해 드려요)</span></h3>
+        <textarea id="idea" rows="3" placeholder="예) 상담 대학원생 200명에게 설문해서 애착 불안 → 자기자비 → 우울 매개모형을 검증하고 싶다"></textarea>
+        <div class="row" style="margin-top:8px"><button class="primary" id="go" ${planJob[p.id] ? "disabled" : ""}>연구계획 세우기</button>
+        <span class="muted small">인터넷 학술 색인 조사 + 로컬 AI 분석 (보통 2~6분)</span></div></div>
+      ${planJob[p.id] ? `<div class="card"><h3><span class="spin"></span> 진행 상황</h3><div class="log" id="planLog">시작…</div></div>` : ""}
+    </div>`;
+    const go = $("#go");
+    go.onclick = async () => {
+      const topic = $("#topic").value.trim();
+      await api(`/api/projects/${p.id}`, { method: "PUT", json: { topic } });
+      p.topic = topic;
+      startPlan($("#idea").value);
+    };
+    return;
+  }
+  const pl = p.plan, lit = pl.literature || [];
+  const rec = (pl.recommended || 1) - 1;
+  body.innerHTML = `<div class="pad">
+    <div class="card"><div class="row"><h3 class="grow">주제: ${esc(p.topic)}</h3><button class="small" id="replan">다시 세우기</button></div>
+      <div class="small muted">검색어: ${esc((pl.keywords?.ko_keywords || []).join(", "))} · ${esc((pl.keywords?.en_keywords || []).join(", "))}</div></div>
+    <div class="card"><p class="small muted" style="margin-top:0">※ 아래 요약은 AI가 논문 제목·초록을 보고 쓴 것이라 집필 단계처럼 원문 대조 검증은 하지 않았어요. 파란 (저자, 연도)를 누르면 해당 논문으로 이동합니다.</p><h3>배경</h3><p>${refLinks(pl.background, lit)}</p>
+      <h3>선행연구의 흐름</h3><p>${refLinks(pl.literature_flow, lit)}</p>
+      <h3>연구 공백</h3><ul>${(pl.gaps || []).map((g) => `<li>${refLinks(g, lit)}</li>`).join("")}</ul></div>
+    <h3>추천 연구 경로 — 하나를 골라 승인하세요</h3>
+    <div class="routes">${(pl.routes || []).map((r, i) => `
+      <div class="route ${i === S.routeSel ? "sel" : ""}" data-i="${i}">
+        ${r.user ? `<span class="badge warn">내 제안</span>` : i === rec ? `<span class="badge">AI 추천</span>` : ""}
+        <h4>${i + 1}. ${esc(r.name)}</h4>
+        ${r.user ? `<div class="small muted">처음 쓰신 내용: “${esc(r.idea)}”</div>` : ""}
+        <dl>
+          <dt>연구문제</dt><dd><ul>${(r.questions || []).map((q) => `<li>${esc(q)}</li>`).join("")}</ul></dd>
+          <dt>방법</dt><dd>${esc(r.method)}</dd>
+          <dt>대상·자료</dt><dd>${esc(r.data)}</dd>
+          <dt>분석</dt><dd>${esc(r.analysis)}</dd>
+          <dt>장점</dt><dd>${esc(r.pros)}</dd>
+          <dt>어려움</dt><dd>${esc(r.cons)}</dd>
+          <dt>목차</dt><dd><ul>${(r.outline || []).map((o) => `<li>${esc(o)}</li>`).join("")}</ul></dd>
+          ${r.advice ? `<dt>AI의 보완 제안</dt><dd>${esc(r.advice)}</dd>` : ""}
+        </dl>
+        ${r.user ? `<div class="row" style="margin-top:8px"><button class="small" data-edit="${i}">고쳐서 다시 제안</button><button class="small ghost" data-del="${i}">빼기</button></div>` : ""}
+      </div>`).join("")}</div>
+    <div class="card" style="margin-top:12px"><h3>✏️ 내가 생각한 경로 제안하기</h3>
+      <p class="small muted">하고 싶은 연구를 편하게 적어주세요. AI가 연구문제·방법·목차로 정리하고, 선행연구에 비추어 보완할 점을 알려드려요.</p>
+      <textarea id="myIdea" rows="3" placeholder="예) 상담 대학원생 200명에게 설문해서 애착 불안 → 자기자비 → 우울 매개모형을 검증하고 싶다"></textarea>
+      <div class="row" style="margin-top:8px"><button class="primary" id="addRoute">내 경로로 정리하기</button><span class="muted small">약 1~2분</span></div></div>
+    <div class="card" style="margin-top:12px"><b>추천 이유</b> ${refLinks(pl.recommend_reason, lit)}</div>
+    <div class="card row"><div class="grow"><b>승인하면</b> 고른 경로에 맞는 논문을 인터넷에서 직접 찾아 내려받습니다
+      ${S.status?.settings?.lib_proxy_prefix || S.status?.settings?.lib_login_url ? "(무료가 아닌 논문은 대학 도서관 로그인 경유)" : "(무료 공개 논문만 — 도서관 연결은 설정에서)"}.</div>
+      <div class="row" style="flex-wrap:nowrap"><button id="approveNight" title="오늘 밤 로컬 AI로 무료 처리">🌙 새벽 2시에 수집</button>
+      <button class="primary" id="approve">이 경로로 승인 → 자료 수집</button></div></div>
+    <div class="card"><h3>조사된 선행연구 ${lit.length}편 <span class="muted small">(실제 학술 색인 OpenAlex 검색 결과)</span></h3>
+      <table><tr><th>#</th><th>제목</th><th>저자 · 연도</th><th>피인용</th><th>원문</th></tr>
+      ${lit.map((w, i) => `<tr id="lit-${i}"><td>${i + 1}</td><td>${w.doi ? `<a href="https://doi.org/${esc(w.doi)}" target="_blank">${esc(w.title)}</a>` : esc(w.title)}</td>
+        <td>${esc(w.authors.slice(0, 3).join(", "))}${w.authors.length > 3 ? " 외" : ""} · ${esc(w.year)}</td><td>${w.cited}</td>
+        <td>${w.is_oa ? `<span class="badge">무료</span>` : `<span class="badge gray">구독</span>`}</td></tr>`).join("")}</table></div>
+    ${pl.local?.length ? `<div class="card"><h3>내 컴퓨터에 이미 있는 관련 자료</h3>${pl.local.map((c) => `<div class="result" data-chunk="${c.id}"><span class="c">${esc(c.cite)}</span> <span class="t">${esc(c.title)} · p.${c.page + 1}</span></div>`).join("")}</div>` : ""}
+  </div>`;
+  $$(".ref[data-lit]", body).forEach((r) => (r.onclick = () => {
+    const row = $("#lit-" + r.dataset.lit);
+    row.scrollIntoView({ block: "center", behavior: "smooth" });
+    row.classList.add("flash");
+    setTimeout(() => row.classList.remove("flash"), 1800);
+  }));
+  $("#approveNight").onclick = async () => {
+    await api(`/api/projects/${p.id}`, { method: "PUT", json: { route: S.routeSel } });
+    p.route = S.routeSel;
+    scheduleNight("collect", { route: S.routeSel });
+  };
+  $$(".route").forEach((d) => (d.onclick = () => { S.routeSel = +d.dataset.i; $$(".route").forEach((x) => x.classList.toggle("sel", x === d)); }));
+  $("#replan").onclick = () => { if (confirm("연구계획을 새로 세울까요? (내 제안 경로도 지워집니다)")) startPlan(); };
+  $$(".route button", body).forEach((b) => b.addEventListener("click", (e) => e.stopPropagation()));
+  $$("[data-del]", body).forEach((b) => (b.onclick = async (e) => {
+    e.stopPropagation();
+    await api(`/api/projects/${p.id}/route_del`, { json: { index: +b.dataset.del } });
+    S.cur = await api(`/api/projects/${p.id}`); S.routeSel = S.cur.route || 0; renderPlan();
+  }));
+  $$("[data-edit]", body).forEach((b) => (b.onclick = (e) => {
+    e.stopPropagation();
+    $("#myIdea").value = pl.routes[+b.dataset.edit].idea || "";
+    $("#myIdea").focus();
+    $("#myIdea").scrollIntoView({ block: "center", behavior: "smooth" });
+  }));
+  $("#addRoute").onclick = async () => {
+    const idea = $("#myIdea").value.trim();
+    if (!idea) return toast("하고 싶은 연구를 적어주세요");
+    $("#addRoute").disabled = true;
+    const { job } = await api(`/api/projects/${p.id}/route_add`, { json: { idea } });
+    runJob(job, "내 경로 정리 중", {
+      onDone: async (r, j) => {
+        if (S.cur?.id !== p.id) return;
+        S.cur = await api(`/api/projects/${p.id}`);
+        S.routeSel = S.cur.route || 0;
+        if (S.tab === "plan") renderPlan();
+        if (j.status === "done") { toast("내 경로를 정리했어요 — 선택된 상태입니다"); requestAnimationFrame(() => $(".route.sel")?.scrollIntoView({ block: "center" })); }
+      },
+    });
+  };
+  $$(".result[data-chunk]", body).forEach((d) => (d.onclick = () => showEvidence({ chunk: d.dataset.chunk, quote: "" })));
+  $("#approve").onclick = async () => {
+    const { job } = await api(`/api/projects/${p.id}/collect`, { json: { route: S.routeSel } });
+    p.route = S.routeSel;
+    collectJob[p.id] = job;
+    S.tab = "collect";
+    renderProject();
+    runJob(job, "자료 수집 중", { logEl: "collectLog", onDone: () => { delete collectJob[p.id]; if (S.cur?.id === p.id && S.tab === "collect") renderCollect(); toast("자료 수집 완료 — ③ 집필로 넘어가세요"); } });
+  };
+}
+
+// ---------- ② 자료수집 ----------
+let collectJob = {};
+async function renderCollect() {
+  const p = S.cur;
+  const running = collectJob[p.id];
+  $("#tabBody").innerHTML = `<div class="pad">
+    ${running ? `<div class="card"><h3><span class="spin"></span> 자료 수집 진행 상황</h3><div class="log" id="collectLog">…</div></div>` : ""}
+    <div class="card"><h3>자료 더하기</h3>
+      <div class="row">
+        <button id="scanBtn">🔍 내 컴퓨터 PDF 찾아 읽기</button>
+        <button id="upBtn">＋ PDF 파일 추가</button><input type="file" id="upFile" accept=".pdf" multiple hidden>
+        ${p.plan ? `<button id="moreBtn">🌐 인터넷에서 더 수집</button>` : ""}
+        <span class="grow"></span><button class="primary" id="toWrite">③ 집필로 →</button>
+      </div>
+      <p class="small muted">검색 폴더: ${esc((S.status?.settings?.scan_folders || []).join(" · "))} (설정에서 변경)</p></div>
+    <div class="card"><h3>내 자료 (최근 추가순)</h3><div id="plist" class="muted">불러오는 중…</div></div>
+  </div>`;
+  bindAddButtons(() => renderCollect());
+  if ($("#moreBtn")) $("#moreBtn").onclick = async () => {
+    const { job } = await api(`/api/projects/${p.id}/collect`, { json: { route: p.route || 0 } });
+    collectJob[p.id] = job;
+    renderCollect();
+    runJob(job, "자료 수집 중", { logEl: "collectLog", onDone: () => { delete collectJob[p.id]; if (S.tab === "collect") renderCollect(); } });
+  };
+  $("#toWrite").onclick = () => { S.tab = "write"; renderProject(); };
+  const papers = await api("/api/papers");
+  $("#plist").innerHTML = paperTable(papers.slice(0, 40));
+  bindPaperTable($("#plist"), renderCollect);
+}
+
+function bindAddButtons(after) {
+  $("#scanBtn").onclick = async () => {
+    const { job } = await api("/api/scan", { method: "POST" });
+    runJob(job, "내 컴퓨터 PDF 읽는 중", { onDone: after });
+  };
+  $("#upBtn").onclick = () => $("#upFile").click();
+  $("#upFile").onchange = async (e) => {
+    const fd = new FormData();
+    [...e.target.files].forEach((f) => fd.append("files", f));
+    const { job } = await api("/api/papers/upload", { method: "POST", body: fd });
+    runJob(job, "PDF 읽는 중", { onDone: after });
+  };
+}
+
+function paperTable(papers) {
+  if (!papers.length) return `<p class="muted">아직 자료가 없어요. 위 버튼으로 PDF를 추가하거나 내 컴퓨터를 검색하세요.</p>`;
+  return `<table><tr><th>인용 표기</th><th>제목</th><th>쪽</th><th>출처</th><th></th></tr>
+    ${papers.map((p) => `<tr data-id="${p.id}"><td><b>${esc(p.cite)}</b></td><td>${esc(p.title)}
+      ${p.status !== "ok" ? `<span class="badge warn">글자 없음(스캔본)</span>` : ""}</td><td>${p.pages || ""}</td>
+      <td class="small muted">${p.source === "web" ? "인터넷" : "내 PC"}</td>
+      <td class="row" style="flex-wrap:nowrap"><button class="small" data-a="edit">수정</button><a class="small" href="/api/pdf/${p.id}" target="_blank">PDF</a>
+      <button class="small ghost" data-a="del">빼기</button></td></tr>`).join("")}</table>`;
+}
+
+function bindPaperTable(root, after) {
+  $$("tr[data-id]", root).forEach((tr) => {
+    const id = tr.dataset.id;
+    $$("button", tr).forEach((b) => (b.onclick = async () => {
+      if (b.dataset.a === "del") {
+        if (!confirm("이 자료를 목록에서 뺄까요? (PDF 파일은 지우지 않습니다)")) return;
+        await api(`/api/papers/${id}`, { method: "DELETE" });
+        return after();
+      }
+      const papers = await api("/api/papers");
+      const p = papers.find((x) => x.id == id);
+      const r = await formDialog("인용 정보 수정", [
+        ["title", "제목", p.title],
+        ["authors", "저자 (쉼표로 구분, 예: 이기태, 김민수)", p.authors.join(", ")],
+        ["year", "연도", p.year],
+      ]);
+      if (!r) return;
+      await api(`/api/papers/${id}`, { method: "PUT", json: { title: r.title, year: r.year, authors: r.authors.split(",").map((s) => s.trim()).filter(Boolean) } });
+      after();
+    }));
+  });
+}
+
+function formDialog(title, fields, okText = "저장") {
+  return new Promise((resolve) => {
+    const d = document.createElement("dialog");
+    d.innerHTML = `<h3 style="margin-top:0">${esc(title)}</h3>
+      ${fields.map(([k, label, v, type]) => type === "checks"
+        ? `<div class="field"><span>${esc(label)}</span>${v.map((o, i) => `<label class="chk"><input type="checkbox" name="${k}" value="${esc(o)}" checked> ${esc(o)}</label>`).join("")}</div>`
+        : `<label class="field"><span>${esc(label)}</span><input name="${k}" value="${esc(v)}"></label>`).join("")}
+      <div class="row" style="justify-content:flex-end"><button data-x="0">취소</button><button class="primary" data-x="1">${esc(okText)}</button></div>`;
+    document.body.appendChild(d);
+    d.showModal();
+    d.onclick = (e) => {
+      const x = e.target.dataset?.x;
+      if (x === undefined) return;
+      let out = null;
+      if (x === "1") {
+        out = {};
+        fields.forEach(([k, , , type]) => {
+          out[k] = type === "checks" ? $$(`input[name="${k}"]:checked`, d).map((i) => i.value) : $(`input[name="${k}"]`, d).value;
+        });
+      }
+      d.close(); d.remove(); resolve(out);
+    };
+  });
+}
+
+// ---------- ③ 집필 ----------
+let editor = null, margin = null, saveT = null, detectT = null, composing = false, openCite = null;
+const citeMsg = new WeakMap();
+
+function renderWrite() {
+  const p = S.cur;
+  $("#tabBody").innerHTML = `
+    <div class="toolbar">
+      <button class="primary" id="aiWrite">✍ AI로 집필</button>
+      <button id="aiWriteNight" title="오늘 밤 로컬 AI로 무료 처리">🌙 새벽 집필 예약</button>
+      <button id="autoAll">🤖 출처 필요(?) 모두 자동 찾기</button>
+      <button id="refsBtn">📑 참고문헌 만들기</button>
+      <span class="hint" id="saveState">(저자, 연도)로 쓰면 자동 인식 · 인용을 누르면 원문 위치</span>
+    </div>
+    <div class="desk"><div class="paper" id="editor" contenteditable="true" spellcheck="false"></div><div class="margin" id="margin"></div></div>`;
+  editor = $("#editor");
+  margin = $("#margin");
+  editor.innerHTML = p.content || "";
+  if (reviewJob[p.id]) {
+    editor.contentEditable = "false";
+    $(".toolbar").insertAdjacentHTML("afterend", `<div class="lockbar"><span class="spin"></span> 원고 점검 중이라 편집을 잠가 두었어요. 끝나면 결과가 원고에 표시됩니다.</div>`);
+  }
+  normalizeCites();
+  editor.addEventListener("compositionstart", () => (composing = true));
+  editor.addEventListener("compositionend", () => { composing = false; scheduleDetect(); });
+  editor.addEventListener("input", () => { scheduleDetect(); scheduleSave(); layoutMemos(); });
+  editor.addEventListener("blur", () => detectCites(true));
+  editor.addEventListener("click", (e) => {
+    const c = e.target.closest(".cite");
+    if (!c) return;
+    e.preventDefault();
+    if (c.dataset.chunk) showEvidence(c);
+    if (!c.dataset.chunk || c.classList.contains("warn")) toggleMemo(c, true);
+  });
+  editor.addEventListener("paste", (e) => {
+    e.preventDefault();
+    document.execCommand("insertText", false, e.clipboardData.getData("text/plain"));
+  });
+  $("#aiWrite").onclick = () => aiWriteDialog(false);
+  $("#aiWriteNight").onclick = () => aiWriteDialog(true);
+  $("#autoAll").onclick = autoAll;
+  $("#refsBtn").onclick = makeRefs;
+  requestAnimationFrame(layoutMemos);
+}
+
+function normalizeCites() {
+  $$(".cite", editor).forEach((c) => {
+    c.contentEditable = "false";
+    c.classList.toggle("need", !c.dataset.chunk);
+  });
+  if (S.focusCid) {  // ④ 원고 점검 결과에서 누른 인용으로 이동
+    const c = $(`.cite[data-cid="${S.focusCid}"]`, editor);
+    S.focusCid = null;
+    if (c) requestAnimationFrame(() => { c.scrollIntoView({ block: "center", behavior: "smooth" }); toggleMemo(c, true); if (c.dataset.chunk) showEvidence(c); });
+  }
+}
+
+function scheduleSave() {
+  $("#saveState").textContent = "저장 대기…";
+  clearTimeout(saveT);
+  saveT = setTimeout(saveNow, 1200);
+}
+async function saveNow() {
+  if (!editor || !S.cur || !document.body.contains(editor)) return;
+  clearTimeout(saveT);
+  const content = editor.innerHTML;
+  if (content === S.cur.content) return;
+  S.cur.content = content;
+  await api(`/api/projects/${S.cur.id}`, { method: "PUT", json: { content } });
+  const st = $("#saveState");
+  if (st) st.textContent = "저장됨 ✓";
+}
+
+function scheduleDetect() {
+  clearTimeout(detectT);
+  detectT = setTimeout(() => detectCites(false), 700);
+}
+
+// 사용자가 직접 쓴 "(이기태, 2026)"을 인용으로 바꾸고 '?' 메모를 단다
+function detectCites(force) {
+  if (!editor || composing) return;
+  const sel = getSelection();
+  let caretNode = sel.rangeCount ? sel.anchorNode : null;
+  const caretOff = sel.anchorOffset;
+  const walker = document.createTreeWalker(editor, NodeFilter.SHOW_TEXT, {
+    acceptNode: (n) => (n.parentElement.closest(".cite") ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT),
+  });
+  const nodes = [];
+  while (walker.nextNode()) nodes.push(walker.currentNode);
+  let changed = false;
+  for (const node of nodes) {
+    const ms = findCites(node.data);
+    for (let i = ms.length - 1; i >= 0; i--) {
+      const m = ms[i];
+      const end = m.index + m.length;
+      const isCaret = node === caretNode;
+      if (!force && isCaret && caretOff === end) continue; // 아직 타이핑 중
+      const mid = node.splitText(m.index);
+      const rest = mid.splitText(m.length);
+      const frag = document.createDocumentFragment();
+      if (m.group) frag.append("(");
+      let span;
+      m.parts.forEach((label, k) => {
+        if (k) frag.append("; ");
+        span = document.createElement("span");
+        span.className = "cite need";
+        span.contentEditable = "false";
+        span.textContent = label;
+        frag.append(span);
+      });
+      if (m.group) frag.append(")");
+      mid.replaceWith(frag);
+      changed = true;
+      if (isCaret && caretOff >= m.index && !force) {
+        const r = document.createRange();
+        if (caretOff >= end) r.setStart(rest, caretOff - end); else r.setStartAfter(span);
+        r.collapse(true);
+        sel.removeAllRanges();
+        sel.addRange(r);
+        caretNode = null;
+      }
+    }
+  }
+  if (changed) { layoutMemos(); scheduleSave(); }
+}
+
+function parseLabel(label) {
+  const t = label.trim();
+  const m = t.match(/^\(?\s*(.+?)\s*,\s*((?:19|20)\d{2}[a-z]?|연도미상)(?:\s*,\s*pp?\.\s*[\d\-–]+)?\s*\)?$/) || t.match(/^(.+?)\s?\(((?:19|20)\d{2}[a-z]?)\)$/);
+  return m ? { author: m[1].trim(), year: m[2] === "연도미상" ? "" : m[2] } : { author: "", year: "" };
+}
+
+function sentenceOf(c) {
+  let block = c.parentElement;
+  while (block && block !== editor && getComputedStyle(block).display === "inline") block = block.parentElement;
+  const r = document.createRange();
+  r.setStart(block, 0);
+  r.setEndBefore(c);
+  const clean = (x) => x.replace(CITE_RE, "").replace(/\((출처 필요|저자미상[^)]*)\)/g, "").replace(/\(\s*[;,\s]*\)/g, "").replace(/\s+([.,;:!?])/g, "$1");
+  const parts = clean(r.toString()).split(/(?<=[.!?。])\s+/);
+  let s = (parts.pop() || "").trim();
+  if (/\((?:19|20)\d{2}[a-z]?\)$/.test(c.textContent.trim())) {
+    // 저자(연도) 형태는 인용이 들어 있는 문장 전체
+    const r2 = document.createRange();
+    r2.setStartAfter(c);
+    r2.setEnd(block, block.childNodes.length);
+    const tail = clean(r2.toString()).split(/(?<=[.!?。])\s+/)[0];
+    return `${s} ${c.textContent.trim()}${tail}`.trim();
+  }
+  if (s.length < 10 && parts.length) s = parts.pop().trim() + " " + s;
+  return s.replace(/^[\s.;,)]+/, "");
+}
+
+function layoutMemos() {
+  if (!margin || !editor) return;
+  margin.innerHTML = "";
+  const base = margin.getBoundingClientRect().top;
+  let bottom = -Infinity;
+  $$(".cite.need, .cite.warn", editor).forEach((c) => {
+    const top = c.getBoundingClientRect().top - base - 2;
+    const y = Math.max(top, bottom + 6);
+    const m = document.createElement("div");
+    const warn = c.classList.contains("warn") && !c.classList.contains("need");
+    m.className = "memo" + (warn ? " warn" : "") + (openCite === c ? " open" : "");
+    m.style.top = y + "px";
+    const msg = citeMsg.get(c) || "";
+    const note = c.dataset.note || "";
+    const sug = c.dataset.sugChunk ? `<div class="sug">추천 근거: <b>${esc(c.dataset.sugLabel)}</b>
+        <div class="row"><button data-a="sugview">미리보기</button><button class="primary" data-a="sugapply">이 근거 적용</button></div></div>` : "";
+    m.innerHTML = warn
+      ? `<span class="dot"><b>⚠</b>내용 확인</span>
+      <div class="box"><div class="lbl">${esc(c.textContent)}</div>
+        <div class="sent">“${esc(sentenceOf(c).slice(0, 120))}”</div>
+        <div class="prog">${esc(note || "원문과 내용이 다를 수 있어요")}</div>
+        <div class="row"><button data-a="view">원문 보기</button><button data-a="auto">다른 근거 찾기</button><button data-a="okay">괜찮아요</button></div>
+        ${msg ? `<div class="prog">${esc(msg)}</div>` : ""}</div>`
+      : `<span class="dot"><b>?</b>${c.dataset.sugChunk ? "추천 근거 있음" : "출처 필요"}</span>
+      <div class="box"><div class="lbl">${esc(c.textContent)}</div>
+        <div class="sent">“${esc(sentenceOf(c).slice(0, 120))}”</div>
+        ${note && !c.dataset.sugChunk ? `<div class="prog">${esc(note)}</div>` : ""}${sug}
+        <div class="row"><button data-a="manual">직접 찾기</button><button class="primary" data-a="auto">자동</button></div>
+        ${msg ? `<div class="prog">${esc(msg)}</div>` : ""}</div>`;
+    margin.appendChild(m);
+    const on = (a, f) => { const b = $(`[data-a="${a}"]`, m); if (b) b.onclick = f; };
+    $(".dot", m).onclick = () => toggleMemo(c);
+    on("manual", () => showFinder(c));
+    on("auto", () => autoFind(c));
+    on("view", () => showEvidence(c));
+    on("okay", () => { c.classList.remove("warn"); delete c.dataset.note; openCite = null; layoutMemos(); scheduleSave(); });
+    on("sugview", () => showEvidence({ chunk: c.dataset.sugChunk, quote: c.dataset.sugQuote }));
+    on("sugapply", () => {
+      const hit = { chunk_id: c.dataset.sugChunk, quote: c.dataset.sugQuote };
+      const label = parseLabel(c.textContent).author ? null : c.dataset.sugLabel;
+      ["sugChunk", "sugQuote", "sugLabel", "note", "auto"].forEach((k) => delete c.dataset[k]);
+      linkCite(c, hit, label);
+    });
+    bottom = y + m.offsetHeight;
+  });
+}
+
+function toggleMemo(c, forceOpen) {
+  openCite = forceOpen || openCite !== c ? c : null;
+  $$(".cite.active", editor).forEach((x) => x.classList.remove("active"));
+  if (openCite) c.classList.add("active");
+  layoutMemos();
+}
+
+function linkCite(c, hit, newLabel) {
+  c.dataset.chunk = hit.chunk_id;
+  c.dataset.quote = hit.quote || "";
+  if (newLabel) c.textContent = newLabel;
+  c.classList.remove("need", "warn");
+  delete c.dataset.note;
+  citeMsg.delete(c);
+  if (openCite === c) openCite = null;
+  layoutMemos();
+  scheduleSave();
+  showEvidence(c);
+}
+
+async function autoFind(c) {
+  const { author, year } = parseLabel(c.textContent);
+  const sentence = sentenceOf(c);
+  if (!sentence) return toast("인용 앞에 문장이 없어요");
+  citeMsg.set(c, "로컬 AI가 찾는 중…");
+  layoutMemos();
+  const { job } = await api("/api/autofind", { json: { sentence, author, year, project_id: S.cur?.id } });
+  return runJob(job, `근거 찾기 ${c.textContent}`, {
+    onLog: (last) => { citeMsg.set(c, last); if (openCite === c) layoutMemos(); },
+    onDone: (r) => {
+      if (!r) { citeMsg.set(c, "오류가 났어요. 다시 시도해 주세요."); return layoutMemos(); }
+      if (r.status === "linked") {
+        const keep = author && parseLabel(r.cite).author ? null : r.cite;
+        linkCite(c, r, keep);
+        toast("근거를 찾아 연결했어요");
+      } else if (r.status === "alternative") {
+        if (confirm(`인용하신 ${c.textContent} 논문에서는 근거를 찾지 못했습니다.\n대신 ${r.cite} 「${r.title}」에서 근거를 찾았어요.\n\n인용을 ${r.cite}(으)로 바꿀까요?`)) linkCite(c, r, r.cite);
+        else { citeMsg.set(c, `다른 자료 ${r.cite}에 근거가 있음 (바꾸지 않음)`); layoutMemos(); }
+      } else {
+        citeMsg.set(c, "근거를 찾지 못했어요. '직접 찾기'로 후보를 보세요.");
+        layoutMemos();
+      }
+    },
+  });
+}
+
+async function autoAll() {
+  const list = $$(".cite.need", editor);
+  if (!list.length) return toast("출처 필요(?) 표시가 없어요 👍");
+  if (!confirm(`출처 필요 ${list.length}곳을 차례로 자동으로 찾을까요? (한 곳당 1~3분)`)) return;
+  for (const c of list) if (document.body.contains(c) && c.classList.contains("need")) await autoFind(c);
+}
+
+async function aiWriteDialog(night) {
+  const p = S.cur;
+  if (!p.plan) return toast("먼저 ① 연구계획을 세워주세요");
+  const route = p.plan.routes[p.route || 0];
+  const r = await formDialog("AI로 집필 — 쓸 장을 고르세요", [
+    ["secs", `경로: ${route.name}`, route.outline || [], "checks"],
+    ["extra", "추가로 쓸 장 (선택, 쉼표로 구분)", ""],
+  ], night ? "새벽 2시에 집필하도록 예약" : "집필 시작");
+  if (!r) return;
+  const sections = [...r.secs, ...r.extra.split(",").map((s) => s.trim()).filter(Boolean)];
+  if (!sections.length) return;
+  if (night) return scheduleNight("write", { sections });
+  const { job } = await api(`/api/projects/${p.id}/write`, { json: { sections } });
+  const pid = p.id;
+  runJob(job, "AI 집필 중 (장마다 1~4분)", {
+    onEmit: (html) => {
+      if (S.cur?.id !== pid || !document.body.contains(editor)) {
+        // 다른 화면을 보고 있으면 저장본에 직접 덧붙임
+        api(`/api/projects/${pid}`).then((pp) => api(`/api/projects/${pid}`, { method: "PUT", json: { content: (pp.content || "") + html } }));
+        return;
+      }
+      editor.insertAdjacentHTML("beforeend", html);
+      normalizeCites();
+      layoutMemos();
+      scheduleSave();
+    },
+    onDone: () => toast("집필 완료 — ? 표시는 근거 확인이 필요한 문장이에요"),
+  });
+}
+
+async function makeRefs() {
+  const ids = $$(".cite[data-chunk]", editor).map((c) => c.dataset.chunk);
+  if (!ids.length) return toast("연결된 인용이 아직 없어요");
+  const refs = await api("/api/references", { json: { chunks: ids } });
+  $$("[data-refs]", editor).forEach((e) => e.remove());
+  editor.insertAdjacentHTML("beforeend", `<h2 data-refs="1">참고문헌</h2><div data-refs="1">${refs.map((r) => `<p style="padding-left:2em;text-indent:-2em">${esc(r)}</p>`).join("")}</div>`);
+  scheduleSave();
+  layoutMemos();
+}
+
+// ---------- 새벽 예약 ----------
+async function scheduleNight(kind, args) {
+  const r = await api("/api/schedule", { json: { project_id: S.cur.id, kind, args } });
+  toast(`🌙 ${r.next}에 로컬 AI로 처리하도록 예약했어요`, 4000);
+  if (S.tab === "review") renderReview();
+}
+
+const TOOL_INFO = [
+  ["cites", "② 인용 전체 점검", "원고 속 (저자, 연도)를 모두 찾아 근거를 확인해요 — ✔ 확인 · ⚠ 원문과 다를 수 있음 · ? 근거 없음. 인용이 많으면 오래 걸려요."],
+  ["uncited", "③ 근거 없는 문장 찾기", "인용 없이 주장하는 문장에 '출처 필요'를 달고, 내 자료에서 근거를 추천해요. (연구방법·결과 장은 제외)"],
+  ["discuss", "④ 논의 보강", "결과 장에서 핵심 결과를 뽑아 일치하는 연구·상반되는 연구를 찾고, 논의에 쓸 문장을 제안해요."],
+  ["recent", "⑤ 최신 연구 찾기", "최근 3년 사이 나온 관련 논문 중 원고에 아직 없는 것을 찾아, 원고 어디에 쓰면 좋을지 알려줘요."],
+  ["refs", "⑥ 참고문헌 대조", "본문 인용과 참고문헌 목록을 맞춰봐요 — 목록에 없는 인용 · 연도가 다른 것 · 본문에서 안 쓰인 문헌. (몇 초)"],
+];
+const TOOL_NAME = Object.fromEntries(TOOL_INFO.map(([k, t]) => [k, t.slice(2)]));
+let reviewJob = {};
+
+function kindName(r) {
+  const a = JSON.parse(r.args || "{}");
+  if (r.kind === "collect") return "자료 수집";
+  if (r.kind === "write") return `집필 (${(a.sections || []).length}개 장)`;
+  return a.tool === "full" ? "원고 전체 검토" : TOOL_NAME[a.tool] || "원고 점검";
+}
+
+function reportHtml(k, rep) {
+  if (!rep) return "";
+  const d = rep.data;
+  let h = `<div class="rv-sum">${esc(rep.summary)} <span class="muted small">· ${esc(rep.ran_at)} · ${rep.engine === "claude" ? "Claude" : "로컬 AI"}</span></div>`;
+  const st = { ok: "✔", warn: "⚠", need: "?" };
+  if (k === "cites" && d.length) {
+    const order = { warn: 0, need: 1, ok: 2 };
+    h += [...d].sort((a, b) => order[a.status] - order[b.status]).map((it) => `<div class="rv-item ${it.status}" data-cid="${it.cid}">
+      <b class="st">${st[it.status] || ""}</b> <b>${esc(it.label)}</b> <span class="muted">${esc(it.note || "")}</span>
+      <div class="small">“${esc(it.sentence)}”</div></div>`).join("");
+  }
+  if (k === "uncited" && d.length) {
+    h += d.map((it) => `<div class="rv-item need"><b class="st">?</b> <span class="muted small">${esc(it.section || "본문")}</span>
+      ${it.suggest ? `<span class="badge">추천 ${esc(it.suggest)}</span>` : ""}<div class="small">“${esc(it.sentence)}”</div></div>`).join("");
+  }
+  if (k === "discuss" && d.length) {
+    const rec = (r, rel, fi, ri) => `<div class="rv-item ${rel === "support" ? "ok" : "warn"}">
+      <b>${esc(r.cite)}</b> <span class="muted small">${esc(r.title)}</span>
+      <div class="small">${esc(r.reason)}</div>
+      <div class="small"><b>제안 문장:</b> ${esc(r.sentence)}</div>
+      <div class="row" style="margin-top:4px">${r.chunk_id ? `<button class="small" data-ev="${r.chunk_id}" data-q="${esc(r.quote || "")}">원문 보기</button>` : `<span class="small muted">${r.doi ? `PDF를 받지 못했어요 — <a href="https://doi.org/${esc(r.doi)}" target="_blank">논문 페이지</a>에서 받아 추가하면 근거가 연결돼요` : ""}</span>`}
+      <button class="small primary" data-ins="${fi}-${rel}-${ri}">논의에 넣기</button></div></div>`;
+    h += d.map((f, fi) => `<div class="rv-find"><div class="rv-ftitle">결과 ${fi + 1}. ${esc(f.finding)}</div>
+      ${f.support.length ? `<div class="small muted">일치하는 연구</div>${f.support.map((r, ri) => rec(r, "support", fi, ri)).join("")}` : ""}
+      ${f.contrast.length ? `<div class="small muted">상반되는 연구</div>${f.contrast.map((r, ri) => rec(r, "contrast", fi, ri)).join("")}` : ""}
+      ${!f.support.length && !f.contrast.length ? `<div class="small muted">관련 연구를 찾지 못했어요</div>` : ""}</div>`).join("");
+  }
+  if (k === "recent" && d.length) {
+    h += d.map((w, i) => `<div class="rv-item"><b>${w.doi ? `<a href="https://doi.org/${esc(w.doi)}" target="_blank">${esc(w.title)}</a>` : esc(w.title)}</b>
+      <div class="small muted">${esc((w.authors || []).slice(0, 3).join(", "))} · ${esc(w.year)} · ${esc(w.venue || "")} · 피인용 ${w.cited}</div>
+      ${w.where ? `<div class="small">📍 쓰면 좋을 곳: ${esc(w.where)}</div>` : ""}
+      <details class="small"><summary>초록</summary>${esc(w.abstract)}</details>
+      <div class="row" style="margin-top:4px">${w.is_oa ? `<button class="small" data-get="${i}">내 자료로 내려받기</button>` : `<span class="small muted">구독 논문 — 내려받기는 도서관 경유로 시도</span><button class="small" data-get="${i}">시도</button>`}</div></div>`).join("");
+  }
+  if (k === "refs" && d && d.n_refs !== undefined) {
+    const list = (t, arr, f) => arr.length ? `<div class="small muted" style="margin-top:6px">${t} (${arr.length})</div>${arr.map(f).join("")}` : "";
+    h += list("참고문헌 목록에 없는 본문 인용", d.missing, (x) => `<div class="rv-item need"><b class="st">?</b> ${esc(x)}</div>`);
+    h += list("연도가 다른 것", d.wrong_year, (x) => `<div class="rv-item warn"><b class="st">⚠</b> 본문 ${esc(x.label)}<div class="small">목록: ${esc(x.refs.join(" / "))}</div></div>`);
+    h += list("본문에서 인용하지 않은 문헌", d.unused, (x) => `<div class="rv-item"><b class="st">–</b> <span class="small">${esc(x)}</span></div>`);
+    if (!d.missing.length && !d.wrong_year.length && !d.unused.length) h += `<div class="rv-item ok">✔ 본문 인용과 참고문헌이 모두 맞아요</div>`;
+  }
+  return h;
+}
+
+async function renderReview() {
+  const p = S.cur;
+  const body = $("#tabBody");
+  const has = (p.content || "").replace(/<[^>]+>/g, "").trim().length > 30;
+  let sched = { rows: [], next: "", task: "none" };
+  try { sched = await api("/api/schedule"); } catch {}
+  const mine = sched.rows.filter((r) => r.project_id === p.id && r.status !== "done").slice(0, 10);
+  const rj = reviewJob[p.id];
+  const card = ([k, t, d]) => `<div class="card" id="tool-${k}"><div class="row"><h3 class="grow">${t}</h3>
+      <button class="small" data-night="${k}" ${has ? "" : "disabled"}>🌙 새벽 예약</button>
+      <button class="small primary" data-run="${k}" ${has && !rj ? "" : "disabled"}>지금 실행</button></div>
+      <p class="small muted" style="margin:2px 0 8px">${d}</p>
+      ${rj && (rj.tool === k || rj.tool === "full") ? `<div class="log" id="rvlog-${k}">시작…</div>` : ""}
+      <div class="rv-body">${reportHtml(k, p.reports?.[k])}</div></div>`;
+  body.innerHTML = `<div class="pad">
+    <div class="card"><h3>① 원고 불러오기</h3>
+      <p class="small muted">${has ? "원고가 들어 있어요. 다른 파일로 바꾸려면 다시 불러오세요 (지금 원고는 덮어써져요)." : "이미 쓴 원고(.docx, .hwpx, .txt)를 올리거나 글을 붙여넣으세요. 원고 속 (저자, 연도)·저자(연도)는 자동으로 인용으로 인식돼요."}</p>
+      <div class="row"><button id="impFile">📄 파일 선택</button><input type="file" id="impInput" accept=".docx,.hwpx,.txt,.md,.hwp" hidden>
+        <button id="impPasteBtn">📋 글 붙여넣기</button>${has ? `<button id="goWrite">③ 집필 화면에서 원고 보기 →</button>` : ""}</div>
+      <div id="impPaste" style="display:none;margin-top:8px"><textarea id="impText" rows="7" placeholder="여기에 원고를 붙여넣으세요. 장 제목(I. 서론, 1. 연구의 필요성 등)은 자동으로 제목이 돼요."></textarea>
+        <button class="primary" id="impPasteGo" style="margin-top:6px">불러오기</button></div>
+    </div>
+    <div class="card"><div class="row"><div class="grow"><b>AI 엔진:</b> ${p.engine === "claude" ? "Claude — 빠르고 정확 (사용량만큼 요금)" : "내 컴퓨터 로컬 AI — 무료, 느림"}
+        <label class="chk small"><input type="checkbox" id="localOnly" ${p.local_only ? "checked" : ""}> 이 원고는 로컬 AI만 사용 (상담 사례 등 민감한 내용이 있을 때)</label></div>
+      <button id="fullNight" ${has ? "" : "disabled"}>🌙 새벽 2시에 전체 검토</button>
+      <button class="primary" id="fullNow" ${has && !rj ? "" : "disabled"}>전체 검토 지금</button></div>
+      <p class="small muted" style="margin:4px 0 0">전체 검토 = ⑥ 참고문헌 → ② 인용 → ③ 근거 없는 문장 → ⑤ 최신 연구 → ④ 논의 보강 순서로 모두 실행</p>
+      ${rj && rj.tool === "full" ? `<div class="log" id="rvlog-full" style="margin-top:8px">시작…</div>` : ""}</div>
+    ${mine.length ? `<div class="card"><h3>🌙 예약된 작업 — ${esc(sched.next)} 실행 (로컬 AI)</h3>
+      ${mine.map((r) => `<div class="row small sched"><span class="grow">${esc(kindName(r))} — ${{ waiting: "대기", running: "실행 중", error: "오류" }[r.status] || r.status}</span>
+        ${r.status === "waiting" ? `<button class="small ghost" data-unsched="${r.id}">취소</button>` : ""}</div>`).join("")}
+      ${sched.task !== "registered" ? `<p class="small" style="color:var(--warn);margin-bottom:0">새벽에 컴퓨터가 앱을 자동으로 켜게 하려면 ⚙ 설정 → '새벽 자동 실행 등록'을 눌러주세요. 등록하지 않으면 앱이 켜져 있을 때만 실행돼요.</p>` : ""}</div>` : ""}
+    ${TOOL_INFO.map(card).join("")}
+  </div>`;
+
+  // 불러오기
+  $("#impFile").onclick = () => $("#impInput").click();
+  $("#impInput").onchange = async (e) => {
+    if (has && !confirm("지금 원고를 이 파일로 바꿀까요?")) return;
+    const fd = new FormData();
+    fd.append("file", e.target.files[0]);
+    await api(`/api/projects/${p.id}/import`, { method: "POST", body: fd });
+    S.cur = await api(`/api/projects/${p.id}`);
+    toast("원고를 불러왔어요");
+    renderReview();
+  };
+  $("#impPasteBtn").onclick = () => { $("#impPaste").style.display = "block"; $("#impText").focus(); };
+  $("#impPasteGo").onclick = async () => {
+    const text = $("#impText").value.trim();
+    if (!text) return toast("원고를 붙여넣어 주세요");
+    if (has && !confirm("지금 원고를 붙여넣은 글로 바꿀까요?")) return;
+    const fd = new FormData();
+    fd.append("text", text);
+    await api(`/api/projects/${p.id}/import`, { method: "POST", body: fd });
+    S.cur = await api(`/api/projects/${p.id}`);
+    toast("원고를 불러왔어요");
+    renderReview();
+  };
+  if ($("#goWrite")) $("#goWrite").onclick = () => { S.tab = "write"; renderProject(); };
+  $("#localOnly").onchange = async (e) => {
+    await api(`/api/projects/${p.id}`, { method: "PUT", json: { local_only: e.target.checked ? 1 : 0 } });
+    S.cur = await api(`/api/projects/${p.id}`);
+    renderProject();
+  };
+  $("#fullNow").onclick = () => runReview("full");
+  $("#fullNight").onclick = () => scheduleNight("review", { tool: "full" });
+  $$("[data-run]", body).forEach((b) => (b.onclick = () => runReview(b.dataset.run)));
+  $$("[data-night]", body).forEach((b) => (b.onclick = () => scheduleNight("review", { tool: b.dataset.night })));
+  $$("[data-unsched]", body).forEach((b) => (b.onclick = async () => { await api(`/api/schedule/${b.dataset.unsched}`, { method: "DELETE" }); renderReview(); }));
+  // 결과에서 원고로 이동
+  $$(".rv-item[data-cid]", body).forEach((d) => (d.onclick = () => { S.focusCid = d.dataset.cid; S.tab = "write"; renderProject(); }));
+  $$("[data-ev]", body).forEach((b) => (b.onclick = () => showEvidence({ chunk: b.dataset.ev, quote: b.dataset.q })));
+  $$("[data-ins]", body).forEach((b) => (b.onclick = async () => {
+    const [fi, rel, ri] = b.dataset.ins.split("-");
+    const r = p.reports.discuss.data[+fi][rel][+ri];
+    await api(`/api/projects/${p.id}/insert`, { json: { sentence: r.sentence, chunk_id: r.chunk_id || null, quote: r.quote || "", label: r.cite } });
+    S.cur = await api(`/api/projects/${p.id}`);
+    b.textContent = "넣었어요 ✓";
+    b.disabled = true;
+    toast("논의 장 끝에 문장을 넣었어요 — ③ 집필에서 다듬어 주세요");
+  }));
+  $$("[data-get]", body).forEach((b) => (b.onclick = async () => {
+    const w = p.reports.recent.data[+b.dataset.get];
+    b.disabled = true;
+    const { job } = await api("/api/fetch_work", { json: w });
+    runJob(job, "논문 내려받는 중", { onDone: (r) => { b.textContent = r?.paper ? "내 자료에 추가됨 ✓" : "받지 못했어요"; } });
+  }));
+}
+
+async function runReview(tool) {
+  const p = S.cur;
+  await saveNow();
+  const { job } = await api(`/api/projects/${p.id}/review/${tool}`, { method: "POST" });
+  reviewJob[p.id] = { job, tool };
+  renderReview();
+  const title = tool === "full" ? "원고 전체 검토" : TOOL_NAME[tool];
+  runJob(job, title, {
+    logEl: `rvlog-${tool}`,
+    onDone: async (r, j) => {
+      delete reviewJob[p.id];
+      if (S.cur?.id === p.id) {
+        S.cur = await api(`/api/projects/${p.id}`);
+        if (S.tab === "review" || S.tab === "write") renderProject();
+      }
+      if (j.status === "done") toast(`${title} 완료`);
+    },
+  });
+}
+
+// ---------- 오른쪽 근거 패널 ----------
+function openPanel(titleHtml) {
+  $("#panel").classList.remove("hidden");
+  document.body.classList.add("panel-open");
+  $("#panelTitle").innerHTML = titleHtml;
+  requestAnimationFrame(layoutMemos);
+  return $("#panelBody");
+}
+$("#panelClose").onclick = () => {
+  $("#panel").classList.add("hidden");
+  document.body.classList.remove("panel-open");
+  if (editor) $$(".cite.active", editor).forEach((x) => x.classList.remove("active"));
+  requestAnimationFrame(layoutMemos);
+};
+
+async function showEvidence(src) {
+  const chunk = src.dataset ? src.dataset.chunk : src.chunk;
+  const quote = src.dataset ? src.dataset.quote || "" : src.quote || "";
+  if (src.classList && editor) { $$(".cite.active", editor).forEach((x) => x.classList.remove("active")); src.classList.add("active"); }
+  let e;
+  try { e = await api(`/api/evidence?chunk=${chunk}&quote=${encodeURIComponent(quote)}`); }
+  catch (err) { toast(err.message); return; }
+  const body = openPanel(`<div class="ev-cite">${esc(e.cite)}</div><div class="ev-title">${esc(e.title)}</div>
+    <div class="ev-meta">${esc(e.authors.join(", "))} · ${esc(e.year)} · ${e.pages}쪽 중 <b>${e.page + 1}쪽</b></div>`);
+  renderEvidence(body, e);
+}
+
+function markedText(e) {
+  if (!e.quote_range) return esc(e.text);
+  const [a, b] = e.quote_range;
+  return esc(e.text.slice(0, a)) + "<mark>" + esc(e.text.slice(a, b)) + "</mark>" + esc(e.text.slice(b));
+}
+
+function renderEvidence(box, e, extraHtml = "") {
+  let page = e.page;
+  const matchTxt = e.match >= 0.99 ? `<span class="match ok">✔ 원문과 글자 그대로 일치</span>`
+    : e.match > 0 ? `<span class="match part">부분 일치 (${Math.round(e.match * 100)}%)</span>`
+    : `<span class="match part">문단 단위로 표시</span>`;
+  box.innerHTML = `${extraHtml}${matchTxt}
+    <div class="quote" id="evQuote">${markedText(e)}</div>
+    <div class="pagenav"><button data-d="-1">◀</button><span id="pgLbl"></span><button data-d="1">▶</button>
+      <button class="small" id="backPg">인용 쪽으로</button><span class="grow"></span>
+      <a href="/api/pdf/${e.paper_id}#page=${e.page + 1}" target="_blank">원본 PDF 열기 ↗</a></div>
+    <div class="pageview" id="pv"></div>`;
+  const draw = () => {
+    $("#pgLbl", box).textContent = `${page + 1} / ${e.pages}쪽`;
+    const rects = page === e.page ? e.hl.map((h) => {
+      const [x0, y0, x1, y1] = h.r;
+      return `<div class="hlr ${h.strong || !e.quote_range ? "strong" : ""}" style="left:${(x0 / e.pw) * 100}%;top:${(y0 / e.ph) * 100}%;width:${((x1 - x0) / e.pw) * 100}%;height:${((y1 - y0) / e.ph) * 100}%"></div>`;
+    }).join("") : "";
+    $("#pv", box).innerHTML = `<img src="/api/page/${e.paper_id}/${page}.png" alt="${page + 1}쪽">${rects}`;
+    if (page === e.page) {
+      const img = $("#pv img", box);
+      img.onload = () => {
+        const first = $("#pv .hlr.strong", box);
+        if (first) first.scrollIntoView({ block: "center", behavior: "smooth" });
+      };
+    }
+  };
+  $$(".pagenav button[data-d]", box).forEach((b) => (b.onclick = () => { page = Math.max(0, Math.min(e.pages - 1, page + +b.dataset.d)); draw(); }));
+  $("#backPg", box).onclick = () => { page = e.page; draw(); };
+  draw();
+}
+
+// '직접 찾기': 사용자가 내 자료에서 근거를 골라 연결
+async function showFinder(c) {
+  const { author, year } = parseLabel(c.textContent);
+  const sentence = sentenceOf(c);
+  const body = openPanel(`<div class="ev-cite">근거 직접 찾기</div><div class="ev-meta">${esc(c.textContent)} — “${esc(sentence.slice(0, 80))}”</div>`);
+  const found = author ? await api(`/api/lookup?author=${encodeURIComponent(author)}&year=${year}`) : [];
+  body.innerHTML = `
+    <div class="row"><input id="fq" class="grow" value="${esc(sentence)}"><button class="primary" id="fgo">검색</button></div>
+    ${author ? (found.length
+      ? `<label class="chk"><input type="checkbox" id="fonly" checked> ${esc(author)}(${esc(year)})의 논문에서만 찾기 — ${esc(found[0].title.slice(0, 50))}</label>`
+      : `<p class="small" style="color:var(--warn)">내 자료에 ${esc(c.textContent)} 논문이 없습니다. PDF를 추가하거나 [자동]을 눌러 인터넷에서 찾게 하세요.</p>`) : ""}
+    <div class="row" style="margin:6px 0 12px"><button id="fauto">🤖 자동으로 찾기</button>
+      <button id="fup">＋ 내 컴퓨터 PDF 추가</button><input type="file" id="fupFile" accept=".pdf" multiple hidden></div>
+    <div id="fres" class="muted">검색 중…</div><div id="fprev"></div>`;
+  const search = async () => {
+    const only = $("#fonly", body)?.checked;
+    const q = encodeURIComponent($("#fq", body).value);
+    const r = await api(`/api/search?q=${q}${only ? `&author=${encodeURIComponent(author)}&year=${year}` : ""}`);
+    $("#fres", body).innerHTML = r.results.length
+      ? r.results.map((x, i) => `<div class="result" data-i="${i}"><span class="c">${esc(x.cite)}</span> <span class="t">${esc(x.title)} · p.${x.page + 1}</span><div class="s">${esc(x.text)}</div></div>`).join("")
+      : `<p>결과가 없어요. 다른 말로 검색하거나 PDF를 추가해 보세요.</p>`;
+    $$(".result", body).forEach((d) => (d.onclick = async () => {
+      $$(".result", body).forEach((x) => x.classList.toggle("sel", x === d));
+      const x = r.results[+d.dataset.i];
+      const e = await api(`/api/evidence?chunk=${x.id}`);
+      const prev = $("#fprev", body);
+      renderEvidence(prev, e, `<div class="card" style="margin-top:12px;padding:10px 12px"><div class="row"><b class="grow">${esc(e.cite)} p.${e.page + 1}</b>
+        <button class="primary" id="linkIt">✔ 이 근거로 연결</button></div>
+        <div class="small muted">아래 인용 상자에서 정확한 부분을 드래그해 선택하면 그 줄만 형광펜으로 표시돼요.</div></div>`);
+      $("#linkIt", prev).onclick = () => {
+        const s = getSelection();
+        const q = s.rangeCount && $("#evQuote", prev).contains(s.anchorNode) ? s.toString().trim() : "";
+        const mine = parseLabel(c.textContent);
+        const theirs = parseLabel(e.cite);
+        let label = null;
+        if (!mine.author) label = e.cite;
+        else if (theirs.author && !theirs.author.includes(mine.author.split(/[ ,&]/)[0]) && confirm(`인용 표기를 ${e.cite}(으)로 바꿀까요?`)) label = e.cite;
+        linkCite(c, { chunk_id: e.id, quote: q }, label);
+        toast("근거를 연결했어요");
+      };
+      prev.scrollIntoView({ behavior: "smooth" });
+    }));
+  };
+  $("#fgo", body).onclick = search;
+  $("#fq", body).onkeydown = (ev) => ev.key === "Enter" && search();
+  $("#fonly", body) && ($("#fonly", body).onchange = search);
+  $("#fauto", body).onclick = () => autoFind(c);
+  $("#fup", body).onclick = () => $("#fupFile", body).click();
+  $("#fupFile", body).onchange = async (ev) => {
+    const fd = new FormData();
+    [...ev.target.files].forEach((f) => fd.append("files", f));
+    const { job } = await api("/api/papers/upload", { method: "POST", body: fd });
+    runJob(job, "PDF 읽는 중", { onDone: () => showFinder(c) });
+  };
+  search();
+}
+
+// ---------- Claude 연결 도우미 (각자 자기 키 넣기) ----------
+const CONSOLE = "https://platform.claude.com";
+const WIZ = [
+  {
+    t: "① Anthropic 계정 만들기",
+    b: `<p>Claude를 만든 회사(Anthropic)의 개발자 콘솔에 가입해요. <b>구글 계정으로 가입</b>하면 가장 쉬워요.</p>
+      <p class="small muted">이미 계정이 있으면 로그인만 하고 다음으로 넘어가세요. Claude 채팅 앱(Pro 구독)과는 별개라서, 구독 중이어도 여기 가입이 필요해요.</p>`,
+    link: [CONSOLE, "콘솔 열기 ↗"],
+  },
+  {
+    t: "② 크레딧 충전",
+    b: `<p>Claude는 <b>쓴 만큼만</b> 요금이 나가는 선불 충전 방식이에요. 콘솔의 <b>Billing(결제)</b>에서 카드를 등록하고 충전하세요.</p>
+      <ul class="small">
+        <li>처음엔 <b>5~10달러(약 7천~1만 4천 원)</b>면 충분해요. 연구계획 한 번이 100~200원, 한 장 집필이 100원 안팎이에요(어림값).</li>
+        <li><b>자동 충전은 꺼두세요.</b> 크레딧이 다 떨어지면 멈출 뿐 추가 요금은 나가지 않아요.</li>
+        <li>더 안심하려면 <b>Limits(한도)</b>에서 월 사용 한도를 정해두세요.</li>
+      </ul>`,
+    link: [CONSOLE + "/settings/billing", "결제 페이지 열기 ↗"],
+    link2: [CONSOLE + "/settings/limits", "월 한도 설정 ↗"],
+  },
+  {
+    t: "③ 키 만들어서 붙여넣기",
+    b: `<ol class="small">
+        <li>아래 <b>'키 페이지 열기'</b>를 누르세요. (안 열리면 콘솔 왼쪽 메뉴의 <b>API Keys</b>)</li>
+        <li><b>Create Key</b>를 누르고 이름을 <b>논문AI</b>로 적어 만드세요.</li>
+        <li>나타난 키(<code>sk-ant-</code>로 시작)의 <b>Copy</b>를 누르세요. <span style="color:var(--warn)">키는 이때 한 번만 보여요.</span></li>
+        <li>이 창으로 돌아와 <b>'📋 복사한 키 붙여넣기'</b>를 누르면 끝!</li>
+      </ol>
+      <div class="row" style="margin-top:8px"><button class="primary" id="wzPaste">📋 복사한 키 붙여넣기</button></div>
+      <input id="wzKey" type="password" placeholder="또는 여기에 직접 붙여넣기 (Ctrl+V)" style="margin-top:8px">
+      <div id="wzMsg" class="small" style="margin-top:8px"></div>`,
+    link: [CONSOLE + "/settings/keys", "키 페이지 열기 ↗"],
+  },
+];
+
+function claudeWizard(onDone) {
+  let step = 0;
+  const d = document.createElement("dialog");
+  d.className = "wizard";
+  document.body.appendChild(d);
+  const draw = () => {
+    const w = WIZ[step];
+    d.innerHTML = `<div class="wz-steps">${WIZ.map((x, i) => `<span class="${i === step ? "on" : i < step ? "done" : ""}">${i < step ? "✓" : i + 1}</span>`).join("")}</div>
+      <h3 style="margin:6px 0 10px">${w.t}</h3>${w.b}
+      <div class="row" style="margin:10px 0"><a class="btnlink" href="${w.link[0]}" target="_blank">${w.link[1]}</a>${w.link2 ? `<a class="btnlink ghostlink" href="${w.link2[0]}" target="_blank">${w.link2[1]}</a>` : ""}</div>
+      <div class="row" style="justify-content:space-between;margin-top:14px"><button data-x="close" class="ghost">나중에 하기</button>
+        <span>${step ? `<button data-x="prev">← 이전</button>` : ""} ${step < WIZ.length - 1 ? `<button class="primary" data-x="next">다음 →</button>` : ""}</span></div>`;
+    d.querySelectorAll("[data-x]").forEach((b) => (b.onclick = () => {
+      const x = b.dataset.x;
+      if (x === "close") { d.close(); d.remove(); return; }
+      step += x === "next" ? 1 : -1;
+      draw();
+    }));
+    if (step === WIZ.length - 1) {
+      const msg = $("#wzMsg", d);
+      const tryKey = async (raw) => {
+        const key = (raw || "").trim().replace(/^["']|["']$/g, "");
+        if (!/^sk-ant-[\w-]{20,}$/.test(key)) {
+          msg.style.color = "var(--warn)";
+          msg.textContent = key ? "Claude 키 모양이 아니에요. 'sk-ant-'로 시작하는 키 전체를 복사했는지 확인해 주세요." : "복사된 내용이 없어요. 콘솔에서 Copy를 먼저 눌러주세요.";
+          return;
+        }
+        msg.style.color = "";
+        msg.innerHTML = `<span class="spin"></span> 저장하고 연결을 확인하는 중…`;
+        await api("/api/settings", { json: { claude_key: key, engine: "claude" } });
+        const r = await api("/api/claude/test", { method: "POST" });
+        if (r.ok) {
+          msg.innerHTML = `✅ <b>연결 완료!</b> 이제 연구계획·집필·원고 점검을 Claude가 해요.<div class="muted">${esc(r.msg)}</div>`;
+          d.querySelector(".row:last-child span").innerHTML = `<button class="primary" id="wzFin">완료</button>`;
+          $("#wzFin", d).onclick = () => { d.close(); d.remove(); refreshStatus(); onDone && onDone(); };
+        } else {
+          await api("/api/settings", { json: { engine: "local" } });
+          msg.style.color = "var(--warn)";
+          msg.textContent = /크레딧|credit|balance/i.test(r.msg)
+            ? "키는 맞는데 크레딧이 없어요. ② 단계로 돌아가 충전한 뒤 다시 시도해 주세요."
+            : "연결에 실패했어요: " + r.msg;
+        }
+      };
+      $("#wzPaste", d).onclick = async () => {
+        try { tryKey(await navigator.clipboard.readText()); }
+        catch { msg.textContent = "클립보드를 읽지 못했어요. 아래 칸을 누르고 Ctrl+V로 붙여넣어 주세요."; $("#wzKey", d).focus(); }
+      };
+      $("#wzKey", d).oninput = (e) => { if (e.target.value.trim().length > 30) tryKey(e.target.value); };
+    }
+  };
+  draw();
+  d.showModal();
+}
+
+// ---------- 내 자료 ----------
+async function renderLibrary() {
+  S.cur = null;
+  loadProjects();
+  $("#main").innerHTML = `<div class="pad">
+    <h2>📚 내 자료</h2>
+    <div class="card"><div class="row">
+      <button id="scanBtn">🔍 내 컴퓨터 PDF 찾아 읽기</button>
+      <button id="upBtn">＋ PDF 파일 추가</button><input type="file" id="upFile" accept=".pdf" multiple hidden>
+    </div>
+    <div class="row" style="margin-top:10px"><input id="lq" class="grow" placeholder="내 자료 안에서 내용 검색 (예: 자기자비와 우울)"><button id="lgo">검색</button></div>
+    <div id="lres"></div></div>
+    <div class="card"><div id="plist" class="muted">불러오는 중…</div></div></div>`;
+  bindAddButtons(renderLibrary);
+  const doSearch = async () => {
+    const r = await api(`/api/search?q=${encodeURIComponent($("#lq").value)}`);
+    $("#lres").innerHTML = r.results.map((x) => `<div class="result" data-chunk="${x.id}"><span class="c">${esc(x.cite)}</span> <span class="t">${esc(x.title)} · p.${x.page + 1}</span><div class="s">${esc(x.text)}</div></div>`).join("") || "<p class='muted'>결과 없음</p>";
+    $$("#lres .result").forEach((d) => (d.onclick = () => showEvidence({ chunk: d.dataset.chunk, quote: "" })));
+  };
+  $("#lgo").onclick = doSearch;
+  $("#lq").onkeydown = (e) => e.key === "Enter" && doSearch();
+  const papers = await api("/api/papers");
+  $("#plist").innerHTML = `<h3>전체 ${papers.length}편</h3>` + paperTable(papers);
+  bindPaperTable($("#plist"), renderLibrary);
+}
+
+// ---------- 설정 ----------
+async function renderSettings() {
+  S.cur = null;
+  loadProjects();
+  await refreshStatus();
+  const s = S.status.settings, models = S.status.models || [];
+  const opt = (v, list) => [...new Set([v, ...list])].map((m) => `<option ${m === v ? "selected" : ""}>${esc(m)}</option>`).join("");
+  $("#main").innerHTML = `<div class="pad" style="max-width:720px">
+    <h2>⚙ 설정</h2>
+    <div class="card"><h3>로컬 AI</h3>
+      <label class="field"><span>글쓰기 모델 (클수록 똑똑하지만 느림)</span><select id="model">${opt(s.model, models.filter((m) => !m.includes("bge")))}</select></label>
+      <label class="field"><span>검색 모델 (한국어·영어 의미 검색)</span><select id="embed_model">${opt(s.embed_model, models)}</select></label>
+      <label class="chk"><input type="checkbox" id="strict_verify" ${s.strict_verify ? "checked" : ""}> 엄격 검증 — AI가 쓴 문장의 인용구가 원문에서 확인되지 않으면 '?'로 표시</label>
+      ${models.length ? "" : `<p style="color:var(--warn)">Ollama가 꺼져 있어요. 시작 메뉴에서 Ollama를 실행해 주세요.</p>`}
+    </div>
+    <div class="card"><h3>AI 엔진</h3>
+      <label class="chk"><input type="radio" name="engine" value="local" ${s.engine !== "claude" ? "checked" : ""}> 내 컴퓨터 로컬 AI — 무료, 느림, 원고가 밖으로 나가지 않음</label>
+      <label class="chk"><input type="radio" name="engine" value="claude" ${s.engine === "claude" ? "checked" : ""}> Claude (인터넷) — 연구계획·집필·원고 점검이 빠르고 정확함, 사용량만큼 요금</label>
+      <label class="field" style="margin-top:6px"><span>Claude API 키 (Anthropic 콘솔에서 발급 · 이 컴퓨터에 암호화 저장)</span><input id="claude_key" type="password" value="${esc(s.claude_key)}" placeholder="sk-ant-..."></label>
+      <div class="row"><button class="primary" id="claudeWiz">🧭 Claude 연결 도우미 (처음이라면)</button><button id="claudeTest">저장하고 연결 테스트</button><span id="claudeMsg" class="small"></span></div>
+      <p class="small" id="claudeUsage" style="margin-bottom:0"></p>
+      <p class="small muted">Claude를 골라도 근거 검색·문장 위치 찾기는 항상 내 컴퓨터에서 해요. 새벽 예약 작업과 '로컬 AI만 사용'을 켠 원고는 항상 로컬 AI로 처리돼요.</p>
+    </div>
+    <div class="card"><h3>🌙 새벽 자동 실행</h3>
+      <p class="small muted">낮에 '🌙 새벽 예약'을 눌러둔 일(자료 수집·집필·원고 검토)을 새벽 2시에 로컬 AI로 처리해요(무료).
+      아래를 등록하면 매일 01:55에 컴퓨터를 절전에서 깨워 앱을 조용히 켜고, 일을 마치면 스스로 꺼져요. 컴퓨터를 완전히 끄면 실행되지 않아요.</p>
+      <div class="row"><span id="nightState" class="small">확인 중…</span><span class="grow"></span>
+        <button id="nightReg">새벽 자동 실행 등록</button><button class="ghost" id="nightUnreg">해제</button><button class="small" id="nightNow">예약 작업 지금 실행</button></div>
+    </div>
+    <div class="card"><h3>내 컴퓨터에서 PDF를 찾을 폴더</h3>
+      <textarea id="scan_folders" rows="4">${esc(s.scan_folders.join("\n"))}</textarea>
+      <p class="small muted">한 줄에 폴더 하나. '내 컴퓨터 PDF 찾아 읽기'와 근거 자동찾기가 이 폴더들을 봅니다.</p>
+      <label class="field"><span>한 번에 내려받을 최대 논문 수</span><input id="max_downloads" type="number" min="1" max="60" value="${s.max_downloads}"></label>
+    </div>
+    <div class="card"><h3>대학 도서관 연결 (선택)</h3>
+      <p class="small muted">무료가 아닌 논문을 학교 도서관 권한으로 내려받을 때 씁니다. 실제 크롬/엣지 창이 열려 자동으로 로그인하고,
+      2단계 인증이 있으면 창에서 직접 마무리하면 됩니다. 로그인 상태는 이 컴퓨터에만 저장되고, 비밀번호는 Windows 계정으로 암호화됩니다.</p>
+      <label class="field"><span>도서관 로그인 페이지 주소</span><input id="lib_login_url" value="${esc(s.lib_login_url)}" placeholder="예) https://lib.○○.ac.kr/login"></label>
+      <label class="field"><span>학외접속(프록시) 주소 앞부분 — 도서관 홈페이지 '학외접속' 안내 참고</span><input id="lib_proxy_prefix" value="${esc(s.lib_proxy_prefix)}" placeholder="예) https://libproxy.○○.ac.kr/_Lib_Proxy_Url/  또는  https://ezproxy.○○.ac.kr/login?url="></label>
+      <div class="row"><label class="field grow"><span>도서관 아이디</span><input id="lib_id" value="${esc(s.lib_id)}"></label>
+      <label class="field grow"><span>비밀번호</span><input id="lib_pw" type="password" value="${esc(s.lib_pw)}"></label></div>
+      <button id="libLogin">저장하고 도서관 로그인 해보기</button>
+    </div>
+    <button class="primary" id="saveSet">저장</button>
+  </div>`;
+  const collect = () => ({
+    model: $("#model").value, embed_model: $("#embed_model").value, strict_verify: $("#strict_verify").checked,
+    scan_folders: $("#scan_folders").value.split("\n").map((x) => x.trim()).filter(Boolean),
+    max_downloads: +$("#max_downloads").value || 15,
+    lib_login_url: $("#lib_login_url").value.trim(), lib_proxy_prefix: $("#lib_proxy_prefix").value.trim(),
+    lib_id: $("#lib_id").value.trim(), lib_pw: $("#lib_pw").value,
+    engine: $('input[name="engine"]:checked').value, claude_key: $("#claude_key").value,
+  });
+  $("#claudeWiz").onclick = () => claudeWizard(renderSettings);
+  $$('input[name="engine"]').forEach((r) => (r.onchange = () => {
+    if (r.value === "claude" && r.checked && !$("#claude_key").value) claudeWizard(renderSettings);
+  }));
+  api("/api/claude/usage").then((u) => {
+    $("#claudeUsage").innerHTML = u.calls
+      ? `이번 달 Claude 사용: <b>약 ${u.won.toLocaleString()}원</b> (US$${u.usd}, ${u.calls}회) <span class="muted">— 이 앱 기준 어림값, 정확한 금액은 <a href="${CONSOLE}/usage" target="_blank">콘솔 사용량</a>에서</span>`
+      : `<span class="muted">이번 달 이 앱에서 Claude를 쓴 기록이 아직 없어요.</span>`;
+  });
+  $("#claudeTest").onclick = async () => {
+    const c = collect();
+    if (!c.claude_key) return toast("API 키를 넣어주세요");
+    await api("/api/settings", { json: c });
+    $("#claudeMsg").textContent = "확인 중…";
+    const r = await api("/api/claude/test", { method: "POST" });
+    if (r.ok && c.engine !== "claude") {  // 연결에 성공했으면 Claude를 쓰도록 바로 전환
+      $('input[name="engine"][value="claude"]').checked = true;
+      await api("/api/settings", { json: { engine: "claude" } });
+      r.msg += " — AI 엔진을 Claude로 바꿨어요";
+    }
+    $("#claudeMsg").textContent = (r.ok ? "✅ " : "⚠ ") + r.msg;
+    $("#claudeMsg").style.color = r.ok ? "" : "var(--warn)";
+    refreshStatus();
+  };
+  const nightState = async () => {
+    const r = await api("/api/schedule");
+    const waiting = r.rows.filter((x) => x.status === "waiting").length;
+    $("#nightState").textContent = `${r.task === "registered" ? "✔ 등록됨" : "등록 안 됨"} · 대기 중인 예약 ${waiting}개`;
+  };
+  nightState();
+  $("#nightReg").onclick = async () => { const r = await api("/api/night/register", { method: "POST" }); toast(r.msg, 7000); nightState(); };
+  $("#nightUnreg").onclick = async () => { const r = await api("/api/night/unregister", { method: "POST" }); toast(r.msg); nightState(); };
+  $("#nightNow").onclick = async () => {
+    if (!confirm("대기 중인 새벽 예약을 지금 바로 로컬 AI로 실행할까요? (컴퓨터가 느려질 수 있어요)")) return;
+    await api("/api/night/run_now", { method: "POST" });
+    toast("예약 작업을 시작했어요. 각 프로젝트의 ④ 원고 점검 탭에서 상태를 볼 수 있어요.", 5000);
+  };
+  $("#saveSet").onclick = async () => {
+    const c = collect();
+    if (c.engine === "claude" && !c.claude_key) return toast("Claude를 쓰려면 API 키를 넣어주세요");
+    await api("/api/settings", { json: c });
+    toast("저장했어요");
+    refreshStatus();
+  };
+  $("#libLogin").onclick = async () => {
+    await api("/api/settings", { json: collect() });
+    const { job } = await api("/api/library/login", { method: "POST" });
+    runJob(job, "도서관 로그인", { onDone: (r, j) => toast(j.log[j.log.length - 1] || "끝", 5000) });
+  };
+}
+
+// ---------- 시작 ----------
+$("#newProject").onclick = showWelcome;
+$$(".top nav button").forEach((b) => (b.onclick = () => { saveNow(); (b.dataset.view === "library" ? renderLibrary : renderSettings)(); }));
+window.addEventListener("resize", () => layoutMemos());
+// 버튼을 눌렀는데 조용히 실패하는 일이 없도록 모든 오류를 화면에 알림
+window.addEventListener("unhandledrejection", (e) => {
+  toast("⚠ " + (e.reason?.message || "문제가 생겼어요"), 7000);
+  $$("button:disabled").forEach((b) => (b.disabled = false));
+});
+window.addEventListener("beforeunload", () => saveNow());
+refreshStatus();
+setInterval(refreshStatus, 8000);
+loadProjects().then(() => (S.projects.length ? openProject(S.projects[0].id) : showWelcome()));

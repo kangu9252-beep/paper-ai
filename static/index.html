@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>논문 AI</title>
+<link rel="stylesheet" href="style.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22%3E%3Ctext y=%22.9em%22 font-size=%2290%22%3E📝%3C/text%3E%3C/svg%3E">
+</head>
+<body>
+<header class="top">
+  <div class="brand">논문 <b>AI</b> <span class="sub">로컬 AI · 모든 문장에 근거</span></div>
+  <nav>
+    <button data-view="library">📚 내 자료</button>
+    <button data-view="settings">⚙ 설정</button>
+  </nav>
+  <div id="status" class="status">연결 확인 중…</div>
+</header>
+
+<div class="layout">
+  <aside class="side">
+    <button class="primary wide" id="newProject">＋ 새 논문</button>
+    <div id="projectList"></div>
+  </aside>
+
+  <main id="main"></main>
+
+  <section id="panel" class="panel hidden">
+    <div class="panel-head">
+      <div id="panelTitle"></div>
+      <button class="icon" id="panelClose" title="닫기">✕</button>
+    </div>
+    <div id="panelBody" class="panel-body"></div>
+  </section>
+</div>
+
+<div id="jobs" class="jobs"></div>
+<div id="toast" class="toast"></div>
+
+<template id="tpl-welcome">
+  <div class="welcome">
+    <h1>어떤 논문을 쓰고 싶으세요?</h1>
+    <p>주제를 적으면 로컬 AI가 선행연구를 조사하고, 연구 경로를 추천합니다.<br>
+       승인하면 자료를 직접 내려받아 읽고, <b>모든 문장에 근거를 달아</b> 초안을 씁니다.</p>
+    <textarea id="welcomeTopic" rows="3" placeholder="예) 성인 애착 유형이 자기자비와 우울의 관계에 미치는 영향"></textarea>
+    <details class="small" style="margin-bottom:10px"><summary>생각해 둔 연구 방향이 있나요? (선택)</summary>
+      <textarea id="welcomeIdea" rows="3" placeholder="예) 상담 대학원생 200명에게 설문해서 애착 불안 → 자기자비 → 우울 매개모형을 검증하고 싶다"></textarea></details>
+    <button class="primary" id="welcomeGo">연구계획 세우기 →</button>
+    <ol class="steps">
+      <li><b>① 연구계획</b> 주제 분석 · 선행연구 조사 · 연구 경로 3가지 추천</li>
+      <li><b>② 자료수집</b> 승인한 경로에 맞춰 논문 PDF를 직접 내려받음 (필요하면 도서관 로그인)</li>
+      <li><b>③ 집필</b> 문장마다 (저자, 연도) 근거 — 누르면 오른쪽에 원문 위치가 형광펜으로</li>
+    </ol>
+    <div class="card" style="margin-top:28px">
+      <h3>이미 쓴 원고가 있나요? — 원고 보강하기</h3>
+      <p class="small muted" style="margin-top:0">원고를 불러오면 인용 근거 확인 · 근거 없는 문장 찾기 · 논의 보강 · 최신 연구 · 참고문헌 대조를 해드려요.</p>
+      <div class="row"><button id="wImpFile">📄 원고 파일 올리기 (.docx · .hwpx · .txt)</button><input type="file" id="wImpInput" accept=".docx,.hwpx,.txt,.md,.hwp" hidden>
+        <button id="wImpPasteBtn">📋 글 붙여넣기</button></div>
+      <div id="wImpPaste" style="display:none;margin-top:8px"><textarea id="wImpText" rows="7" placeholder="원고를 붙여넣으세요"></textarea>
+        <button class="primary" id="wImpGo" style="margin-top:6px">불러와서 보강하기 →</button></div>
+    </div>
+  </div>
+</template>
+
+<script src="app.js"></script>
+</body>
+</html>
