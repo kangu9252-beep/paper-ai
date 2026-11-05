@@ -1,4 +1,4 @@
-"""이미 쓴 원고 보강: ①불러오기 ②인용 전체 점검 ③근거 없는 문장 ④논의 보강 ⑤최신 연구 ⑥참고문헌 대조."""
+"""이미 쓴 원고 보강: ⓪예비심사 리뷰 ①불러오기 ②인용 전체 점검 ③근거 없는 문장 ④논의 보강 ⑤최신 연구 ⑥참고문헌 대조."""
 import datetime
 import html
 import io
@@ -549,7 +549,225 @@ def check_references(pid, log, stop=lambda: False):
     )
 
 
+# ---------- ⓪ 예비심사 리뷰 (일목요연함 중심) ----------
+RQ_RE = re.compile(r"연구\s*문제|연구\s*질문|가설|연구\s*목적|research\s+questions?|hypothes", re.I)
+CONC_HEAD = re.compile(r"결론|논의|제언|conclusion|discussion|고찰", re.I)
+CATS = ["일목요연함", "연구문제-결론 일치", "선행연구와 차별성", "연구방법 타당성", "결과 해석", "한계와 제언", "형식"]
+REVIEWER = (
+    "당신은 이 분야 학위논문 예비심사를 여러 번 맡아 본 엄격하지만 따뜻한 지도교수입니다. "
+    "가장 중요하게 보는 것은 논문이 일목요연한가입니다: 연구문제 → 선행연구 → 방법 → 결과 → 결론이 하나의 줄기로 이어지는지, "
+    "각 장·문단이 그 줄기에 기여하는지, 문단마다 중심 문장이 분명한지. 근거 없이 칭찬하거나 사소한 맞춤법을 지적하지 마세요. "
+    "모든 답은 한국어로 씁니다."
+)
+
+
+def _para_blocks(soup):
+    """[(장 제목, [(P번호, 요소, 글)])] — 참고문헌·AI 메모 제외, 문단마다 data-rv 번호를 붙인다."""
+    out, n = [], 0
+    for title, bl in sections(soup):
+        if title and REF_HEAD.search(title):
+            continue
+        paras = []
+        for b in bl:
+            if "ai-note" in (b.get("class") or []):
+                continue
+            t = _clean(b.get_text(" ", strip=True))
+            if len(t) < 25:
+                continue
+            n += 1
+            b["data-rv"] = f"P{n}"
+            paras.append((f"P{n}", b, t))
+        out.append((title, paras))
+    return out
+
+
+def _add_note(el, note):
+    try:
+        notes = json.loads(el.get("data-review") or "[]")
+    except Exception:
+        notes = []
+    if any(x.get("issue") == note.get("issue") for x in notes):
+        return
+    notes.append(note)
+    el["data-review"] = json.dumps(notes, ensure_ascii=False)
+
+
+SKEL_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "claim": {"type": "string"},
+        "paragraphs": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {"id": {"type": "string"}, "topic": {"type": "string"}, "problem": {"type": "string"}},
+                "required": ["id", "topic", "problem"],
+            },
+        },
+    },
+    "required": ["claim", "paragraphs"],
+}
+JUDGE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "thread": {"type": "string"},
+        "verdict": {"type": "string"},
+        "strengths": {"type": "array", "items": {"type": "string"}},
+        "rq": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "question": {"type": "string"},
+                    "answered": {"type": "string", "enum": ["예", "부분", "아니오"]},
+                    "where": {"type": "string"},
+                    "comment": {"type": "string"},
+                },
+                "required": ["question", "answered", "where", "comment"],
+            },
+        },
+        "critiques": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "severity": {"type": "string", "enum": ["중요", "보통", "사소"]},
+                    "category": {"type": "string", "enum": CATS},
+                    "para": {"type": "string"},
+                    "issue": {"type": "string"},
+                    "fix": {"type": "string"},
+                    "question": {"type": "string"},
+                },
+                "required": ["severity", "category", "para", "issue", "fix", "question"],
+            },
+        },
+    },
+    "required": ["thread", "verdict", "strengths", "rq", "critiques"],
+}
+
+
+def structure_review(pid, log, stop=lambda: False):
+    p, soup = load(pid)
+    for el in soup.select("[data-review]"):
+        del el["data-review"]
+    secs = _para_blocks(soup)
+    byid = {k: el for _, ps in secs for k, el, _ in ps}
+    if not byid:
+        save_report(pid, "structure", {}, "검토할 본문 문단을 찾지 못했어요.", log)
+        return
+    topic = p.get("topic") or p.get("title") or ""
+    claude = llm.engine() == "claude"
+    cut, batch = (1500, 25) if claude else (450, 10)
+
+    # 1단계: 장마다 중심 주장과 문단별 중심 내용 (논문 뼈대)
+    skeleton, prev = [], ""
+    todo = [(t, ps) for t, ps in secs if ps]
+    for i, (title, ps) in enumerate(todo):
+        if stop():
+            return
+        log(f"[뼈대 {i + 1}/{len(todo)}] {title or '(제목 없음)'} 읽는 중…")
+        claim, items = "", []
+        for k in range(0, len(ps), batch):
+            part = ps[k : k + batch]
+            block = "\n\n".join(f"{pp}: {t[:cut]}" for pp, _, t in part)
+            r = llm.chat(
+                f"논문 주제: {topic}\n앞 장의 중심 주장: {prev or '(첫 장)'}\n지금 장: {title or '(제목 없음)'}\n\n[문단들]\n{block}\n\n"
+                "1) claim: 이 장이 말하려는 중심 주장을 한 문장으로.\n"
+                "2) paragraphs: 문단마다 id(P번호 그대로), topic(그 문단의 중심 내용 한 줄, 20자 안팎), "
+                "problem(분명한 문제가 있을 때만 한 문장. 예: 중심 문장이 없어 무엇을 말하려는지 흐림 / 이 장의 주제와 관계가 약함 / "
+                "앞 문단과 연결이 끊김 / 앞 내용의 반복. 문제가 없으면 빈 문자열).",
+                system=REVIEWER,
+                schema=SKEL_SCHEMA,
+                num_ctx=8192,
+                num_predict=1500,
+            )
+            claim = claim or (r.get("claim") or "").strip()
+            known = {pp for pp, _, _ in part}
+            for x in r.get("paragraphs", []):
+                xid = (x.get("id") or "").strip().upper()
+                if xid in known:
+                    items.append({"id": xid, "topic": (x.get("topic") or "").strip(), "problem": (x.get("problem") or "").strip()})
+        skeleton.append({"title": title, "claim": claim, "paras": items})
+        prev = claim
+
+    # 2단계: 전체 줄기 · 연구문제-결론 일치 · 심사 비판
+    if stop():
+        return
+    log("논문 전체 줄기와 심사 의견 정리 중…")
+    sk_text = "\n".join(
+        f"## {s['title'] or '(제목 없음)'} — {s['claim']}\n" + "\n".join(f"  {x['id']}: {x['topic']}" for x in s["paras"]) for s in skeleton
+    )
+    if claude:
+        full = "\n\n".join(f"## {title}\n" + "\n".join(f"{pp}: {t}" for pp, _, t in ps) for title, ps in secs if ps)
+        extra = f"[원고 전문]\n{full[:120000]}"
+        sk_text = sk_text[:40000]
+    else:
+        rq = [f"{pp}: {t[:600]}" for _, ps in secs for pp, _, t in ps if RQ_RE.search(t)][:4]
+        conc = [f"{pp}: {t[:500]}" for title, ps in secs if title and CONC_HEAD.search(title) for pp, _, t in ps]
+        extra = "[연구문제가 나오는 문단]\n" + "\n".join(rq) + "\n\n[결론·논의 일부]\n" + "\n".join(conc)[:2500]
+        sk_text = sk_text[:9000]
+    r = llm.chat(
+        f"논문 주제: {topic}\n\n[논문 뼈대: 장별 중심 주장과 문단별 중심 내용]\n{sk_text}\n\n{extra}\n\n"
+        "예비심사 위원으로서 다음을 작성하세요.\n"
+        "- thread: 이 논문 전체를 관통하는 핵심 주장 한 문장 (원고에서 읽히는 그대로. 줄기가 흐리면 흐리다고 쓰기)\n"
+        "- verdict: 일목요연함에 대한 전체 평 2~3문장\n"
+        "- strengths: 잘된 점 1~3개 (구체적으로)\n"
+        "- rq: 원고의 연구문제마다 question(연구문제), answered(결과·결론에서 답했는지: 예/부분/아니오), "
+        "where(답한 곳 P번호, 없으면 빈칸), comment(한 문장)\n"
+        "- critiques: 심사에서 실제로 나올 비판·수정 요청 5~10개. 각각 severity(중요/보통/사소), category, "
+        "para(가장 관련된 문단 P번호, 논문 전체에 대한 것이면 빈칸), issue(무엇이 문제인지), "
+        "fix(어떻게 고치면 되는지 구체적으로), question(심사위원이 할 법한 질문 한 문장). "
+        "일목요연함과 연구문제-결론 일치를 먼저 보세요.\n"
+        "※ 원고가 아직 결과가 없는 연구계획서(프로포절)라면, rq의 answered는 '연구 설계·분석 방법이 그 연구문제에 답할 수 있게 짜였는지'로 판단하고, "
+        "결과·결론이 없다는 것 자체는 비판하지 마세요.",
+        system=REVIEWER,
+        schema=JUDGE_SCHEMA,
+        num_ctx=8192 if claude else 12288,
+        num_predict=3000,
+    )
+    crit = []
+    for c in r.get("critiques", []):
+        c = {k: (c.get(k) or "").strip() for k in ("severity", "category", "para", "issue", "fix", "question")}
+        if not c["issue"]:
+            continue
+        m = re.search(r"P\d+", c["para"].upper())
+        c["para"] = m.group(0) if m and m.group(0) in byid else ""
+        crit.append(c)
+    order = {"중요": 0, "보통": 1, "사소": 2}
+    crit.sort(key=lambda c: order.get(c["severity"], 1))
+    # 원고 옆 💬 메모로 달기
+    for c in crit:
+        if c["para"]:
+            _add_note(byid[c["para"]], {"sev": c["severity"], "cat": c["category"], "issue": c["issue"], "fix": c["fix"], "q": c["question"]})
+    flow = 0
+    for s in skeleton:
+        for x in s["paras"]:
+            if x["problem"]:
+                flow += 1
+                _add_note(byid[x["id"]], {"sev": "보통", "cat": "일목요연함", "issue": x["problem"], "fix": "", "q": ""})
+    save(pid, soup)
+    rqs = []
+    for x in r.get("rq", []):
+        m = re.search(r"P\d+", (x.get("where") or "").upper())
+        rqs.append(x | {"where": m.group(0) if m and m.group(0) in byid else ""})
+    data = {
+        "thread": r.get("thread", ""),
+        "verdict": r.get("verdict", ""),
+        "strengths": r.get("strengths", [])[:3],
+        "rq": rqs,
+        "critiques": crit,
+        "skeleton": skeleton,
+    }
+    n_imp = sum(c["severity"] == "중요" for c in crit)
+    save_report(
+        pid, "structure", data,
+        f"예비심사 리뷰: 심사 의견 {len(crit)}개(중요 {n_imp}) · 흐름이 걸리는 문단 {flow}개 — 원고 옆 💬 메모로도 달았어요",
+        log,
+    )
+
+
 TOOLS = {
+    "structure": structure_review,
     "cites": check_citations,
     "uncited": uncited_claims,
     "discuss": discussion_boost,
@@ -559,7 +777,7 @@ TOOLS = {
 
 
 def full_review(pid, log, stop=lambda: False):
-    for name in ("refs", "cites", "uncited", "recent", "discuss"):
+    for name in ("structure", "refs", "cites", "uncited", "recent", "discuss"):
         if stop():
             break
         log(f"=== {name} ===")

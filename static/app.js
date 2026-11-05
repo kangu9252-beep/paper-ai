@@ -261,6 +261,7 @@ function renderPlan() {
         <h4>${i + 1}. ${esc(r.name)}</h4>
         ${r.user ? `<div class="small muted">처음 쓰신 내용: “${esc(r.idea)}”</div>` : ""}
         <dl>
+          ${r.thesis ? `<dt>한 줄기</dt><dd><b>${esc(r.thesis)}</b></dd>` : ""}
           <dt>연구문제</dt><dd><ul>${(r.questions || []).map((q) => `<li>${esc(q)}</li>`).join("")}</ul></dd>
           <dt>방법</dt><dd>${esc(r.method)}</dd>
           <dt>대상·자료</dt><dd>${esc(r.data)}</dd>
@@ -496,6 +497,11 @@ function normalizeCites() {
     S.focusCid = null;
     if (c) requestAnimationFrame(() => { c.scrollIntoView({ block: "center", behavior: "smooth" }); toggleMemo(c, true); if (c.dataset.chunk) showEvidence(c); });
   }
+  if (S.focusPara) {  // 예비심사 리뷰에서 누른 문단으로 이동
+    const el = $(`[data-rv="${S.focusPara}"]`, editor);
+    S.focusPara = null;
+    if (el) requestAnimationFrame(() => { el.scrollIntoView({ block: "center", behavior: "smooth" }); if (el.dataset.review) toggleMemo(el, true); else { el.classList.add("flash"); setTimeout(() => el.classList.remove("flash"), 1600); } });
+  }
 }
 
 function scheduleSave() {
@@ -599,10 +605,32 @@ function layoutMemos() {
   margin.innerHTML = "";
   const base = margin.getBoundingClientRect().top;
   let bottom = -Infinity;
-  $$(".cite.need, .cite.warn", editor).forEach((c) => {
+  $$(".cite.need, .cite.warn, [data-review]", editor).forEach((c) => {
     const top = c.getBoundingClientRect().top - base - 2;
     const y = Math.max(top, bottom + 6);
     const m = document.createElement("div");
+    if (c.dataset.review !== undefined) {
+      let notes = [];
+      try { notes = JSON.parse(c.dataset.review || "[]"); } catch {}
+      if (!notes.length) { delete c.dataset.review; return; }
+      m.className = "memo rv" + (openCite === c ? " open" : "");
+      m.style.top = y + "px";
+      m.innerHTML = `<span class="dot"><b>💬</b>심사 의견${notes.length > 1 ? " " + notes.length : ""}</span>
+        <div class="box">${notes.map((n, i) => `<div class="rvn"><div class="lbl"><span class="badge sev-${esc(n.sev)}">${esc(n.sev)}</span> ${esc(n.cat)}</div>
+          <div>${esc(n.issue)}</div>${n.fix ? `<div class="prog">✏ ${esc(n.fix)}</div>` : ""}${n.q ? `<div class="prog">🎤 “${esc(n.q)}”</div>` : ""}
+          <div class="row"><button data-done="${i}">반영했어요</button></div></div>`).join("")}</div>`;
+      margin.appendChild(m);
+      $(".dot", m).onclick = () => toggleMemo(c);
+      $$("[data-done]", m).forEach((b) => (b.onclick = () => {
+        notes.splice(+b.dataset.done, 1);
+        if (notes.length) c.dataset.review = JSON.stringify(notes);
+        else { delete c.dataset.review; c.classList.remove("active"); openCite = null; }
+        layoutMemos();
+        scheduleSave();
+      }));
+      bottom = y + m.offsetHeight;
+      return;
+    }
     const warn = c.classList.contains("warn") && !c.classList.contains("need");
     m.className = "memo" + (warn ? " warn" : "") + (openCite === c ? " open" : "");
     m.style.top = y + "px";
@@ -643,7 +671,7 @@ function layoutMemos() {
 
 function toggleMemo(c, forceOpen) {
   openCite = forceOpen || openCite !== c ? c : null;
-  $$(".cite.active", editor).forEach((x) => x.classList.remove("active"));
+  $$(".cite.active, [data-review].active", editor).forEach((x) => x.classList.remove("active"));
   if (openCite) c.classList.add("active");
   layoutMemos();
 }
@@ -742,6 +770,7 @@ async function scheduleNight(kind, args) {
 }
 
 const TOOL_INFO = [
+  ["structure", "⓪ 예비심사 리뷰", "지도교수·심사위원의 눈으로 읽어요 — 논문이 일목요연한지(연구문제 → 선행연구 → 방법 → 결과 → 결론이 한 줄기인지), 연구문제에 결론이 답하는지 보고, 심사에서 나올 비판과 고칠 점을 제안해요. 원고 옆에 💬 메모로도 달려요."],
   ["cites", "② 인용 전체 점검", "원고 속 (저자, 연도)를 모두 찾아 근거를 확인해요 — ✔ 확인 · ⚠ 원문과 다를 수 있음 · ? 근거 없음. 인용이 많으면 오래 걸려요."],
   ["uncited", "③ 근거 없는 문장 찾기", "인용 없이 주장하는 문장에 '출처 필요'를 달고, 내 자료에서 근거를 추천해요. (연구방법·결과 장은 제외)"],
   ["discuss", "④ 논의 보강", "결과 장에서 핵심 결과를 뽑아 일치하는 연구·상반되는 연구를 찾고, 논의에 쓸 문장을 제안해요."],
@@ -763,6 +792,29 @@ function reportHtml(k, rep) {
   const d = rep.data;
   let h = `<div class="rv-sum">${esc(rep.summary)} <span class="muted small">· ${esc(rep.ran_at)} · ${rep.engine === "claude" ? "Claude" : "로컬 AI"}</span></div>`;
   const st = { ok: "✔", warn: "⚠", need: "?" };
+  if (k === "structure" && d && d.skeleton) {
+    const go = (pp) => pp ? `<button class="small ghost" data-para="${esc(pp)}">원고에서 보기</button>` : "";
+    h += `<div class="sv-thread"><div class="small muted">이 논문의 한 줄기</div><b>${esc(d.thread)}</b><div class="small" style="margin-top:6px">${esc(d.verdict)}</div></div>`;
+    if (d.strengths.length) h += `<div class="small muted" style="margin-top:8px">잘된 점</div>${d.strengths.map((x) => `<div class="rv-item ok"><b class="st">✔</b> ${esc(x)}</div>`).join("")}`;
+    if (d.rq.length) {
+      const mark = { 예: ["ok", "✔ 답함"], 부분: ["warn", "△ 일부"], 아니오: ["need", "✕ 안 답함"] };
+      h += `<div class="small muted" style="margin-top:8px">연구문제 ↔ 결론</div>` + d.rq.map((x) => {
+        const [cl, lb] = mark[x.answered] || ["", x.answered];
+        return `<div class="rv-item ${cl}"><span class="badge rq-${cl}">${lb}</span> ${esc(x.question)}<div class="small muted">${esc(x.comment)}</div>${go(x.where)}</div>`;
+      }).join("");
+    }
+    if (d.critiques.length) {
+      const sevc = { 중요: "need", 보통: "warn", 사소: "" };
+      h += `<div class="small muted" style="margin-top:8px">심사 의견 · 고칠 점</div>` + d.critiques.map((c) => `<div class="rv-item ${sevc[c.severity] || ""}">
+        <span class="badge sev-${esc(c.severity)}">${esc(c.severity)}</span> <span class="small muted">${esc(c.category)}${c.para ? " · " + esc(c.para) : " · 논문 전체"}</span>
+        <div><b>${esc(c.issue)}</b></div>
+        ${c.fix ? `<div class="small">✏ 이렇게 고쳐보세요: ${esc(c.fix)}</div>` : ""}
+        ${c.question ? `<div class="small muted">🎤 예상 질문: “${esc(c.question)}”</div>` : ""}${go(c.para)}</div>`).join("");
+    }
+    h += `<details class="sv-map" open><summary class="small muted">논문 뼈대 — 장마다 하는 말 (빨간 점은 흐름이 걸리는 문단)</summary>
+      ${d.skeleton.map((sec) => `<div class="sv-sec"><div class="sv-h">${esc(sec.title || "(제목 없음)")}</div><div class="sv-claim">${esc(sec.claim)}</div>
+        <div class="sv-paras">${sec.paras.map((x) => `<span class="sv-p${x.problem ? " bad" : ""}" data-para="${esc(x.id)}" title="${esc(x.problem || x.topic)}">${esc(x.id)} ${esc(x.topic)}</span>`).join("")}</div></div>`).join("")}</details>`;
+  }
   if (k === "cites" && d.length) {
     const order = { warn: 0, need: 1, ok: 2 };
     h += [...d].sort((a, b) => order[a.status] - order[b.status]).map((it) => `<div class="rv-item ${it.status}" data-cid="${it.cid}">
@@ -814,6 +866,7 @@ async function renderReview() {
       <button class="small" data-night="${k}" ${has ? "" : "disabled"}>🌙 새벽 예약</button>
       <button class="small primary" data-run="${k}" ${has && !rj ? "" : "disabled"}>지금 실행</button></div>
       <p class="small muted" style="margin:2px 0 8px">${d}</p>
+      ${k === "structure" && p.engine !== "claude" ? `<p class="small" style="color:var(--warn);margin:-4px 0 8px">로컬 AI는 논문 뼈대 정리까지는 쓸 만하지만, 심사 의견은 얕거나 빗나갈 수 있어요. 이 기능은 Claude로 돌리기를 권해요. (민감한 원고라 로컬만 써야 한다면 참고용으로만 보세요)</p>` : ""}
       ${rj && (rj.tool === k || rj.tool === "full") ? `<div class="log" id="rvlog-${k}">시작…</div>` : ""}
       <div class="rv-body">${reportHtml(k, p.reports?.[k])}</div></div>`;
   body.innerHTML = `<div class="pad">
@@ -828,7 +881,7 @@ async function renderReview() {
         <label class="chk small"><input type="checkbox" id="localOnly" ${p.local_only ? "checked" : ""}> 이 원고는 로컬 AI만 사용 (상담 사례 등 민감한 내용이 있을 때)</label></div>
       <button id="fullNight" ${has ? "" : "disabled"}>🌙 새벽 2시에 전체 검토</button>
       <button class="primary" id="fullNow" ${has && !rj ? "" : "disabled"}>전체 검토 지금</button></div>
-      <p class="small muted" style="margin:4px 0 0">전체 검토 = ⑥ 참고문헌 → ② 인용 → ③ 근거 없는 문장 → ⑤ 최신 연구 → ④ 논의 보강 순서로 모두 실행</p>
+      <p class="small muted" style="margin:4px 0 0">전체 검토 = ⓪ 예비심사 리뷰 → ⑥ 참고문헌 → ② 인용 → ③ 근거 없는 문장 → ⑤ 최신 연구 → ④ 논의 보강 순서로 모두 실행</p>
       ${rj && rj.tool === "full" ? `<div class="log" id="rvlog-full" style="margin-top:8px">시작…</div>` : ""}</div>
     ${mine.length ? `<div class="card"><h3>🌙 예약된 작업 — ${esc(sched.next)} 실행 (로컬 AI)</h3>
       ${mine.map((r) => `<div class="row small sched"><span class="grow">${esc(kindName(r))} — ${{ waiting: "대기", running: "실행 중", error: "오류" }[r.status] || r.status}</span>
@@ -873,6 +926,7 @@ async function renderReview() {
   $$("[data-unsched]", body).forEach((b) => (b.onclick = async () => { await api(`/api/schedule/${b.dataset.unsched}`, { method: "DELETE" }); renderReview(); }));
   // 결과에서 원고로 이동
   $$(".rv-item[data-cid]", body).forEach((d) => (d.onclick = () => { S.focusCid = d.dataset.cid; S.tab = "write"; renderProject(); }));
+  $$("[data-para]", body).forEach((d) => (d.onclick = () => { S.focusPara = d.dataset.para; S.tab = "write"; renderProject(); }));
   $$("[data-ev]", body).forEach((b) => (b.onclick = () => showEvidence({ chunk: b.dataset.ev, quote: b.dataset.q })));
   $$("[data-ins]", body).forEach((b) => (b.onclick = async () => {
     const [fi, rel, ri] = b.dataset.ins.split("-");

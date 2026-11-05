@@ -62,7 +62,7 @@ def plan(topic, log):
         "- routes: 이 논문을 진행할 수 있는 서로 다른 연구 경로 3개. 각 경로마다 name(짧은 이름), "
         "questions(연구문제 2~3개), method(연구방법: 양적/질적/문헌연구 등 구체적으로), data(대상·자료 수집 방법), "
         "analysis(분석 방법), pros(장점), cons(단점·어려움), search_queries(이 경로에 필요한 자료를 찾을 영어 검색어 2~3개), "
-        "outline(논문 목차: 장 제목 5~7개, 예: 'I. 서론')\n"
+        "outline(논문 목차: 장 제목 5~7개, 예: 'I. 서론'), thesis(이 경로로 썼을 때 논문 전체를 관통하는 핵심 주장 한 문장)\n"
         "- recommended: 가장 추천하는 경로 번호(1~3)와 recommend_reason(이유)",
         system=SYS,
         schema={
@@ -85,8 +85,9 @@ def plan(topic, log):
                             "cons": {"type": "string"},
                             "search_queries": {"type": "array", "items": {"type": "string"}},
                             "outline": {"type": "array", "items": {"type": "string"}},
+                            "thesis": {"type": "string"},
                         },
-                        "required": ["name", "questions", "method", "data", "analysis", "pros", "cons", "search_queries", "outline"],
+                        "required": ["name", "questions", "method", "data", "analysis", "pros", "cons", "search_queries", "outline", "thesis"],
                     },
                 },
                 "recommended": {"type": "integer"},
@@ -116,9 +117,10 @@ ROUTE_SCHEMA = {
         "cons": {"type": "string"},
         "search_queries": {"type": "array", "items": {"type": "string"}},
         "outline": {"type": "array", "items": {"type": "string"}},
+        "thesis": {"type": "string"},
         "advice": {"type": "string"},
     },
-    "required": ["name", "questions", "method", "data", "analysis", "pros", "cons", "search_queries", "outline", "advice"],
+    "required": ["name", "questions", "method", "data", "analysis", "pros", "cons", "search_queries", "outline", "thesis", "advice"],
 }
 
 
@@ -130,7 +132,7 @@ def refine_route(topic, idea, lit, log):
         f"논문 주제: {topic}\n\n[연구자가 직접 제안한 연구 경로]\n{idea}\n\n[검색된 선행연구]\n{refs}\n\n"
         "연구자의 제안을 존중해서 그 의도를 바꾸지 말고, 다음 형식으로 한국어로 정리하세요: "
         "name(짧은 이름), questions(연구문제 2~3개), method(연구방법), data(대상·자료 수집 방법), analysis(분석 방법), "
-        "pros(장점), cons(어려움), search_queries(필요한 자료를 찾을 영어 검색어 2~3개), outline(논문 목차 5~7개), "
+        "pros(장점), cons(어려움), search_queries(필요한 자료를 찾을 영어 검색어 2~3개), outline(논문 목차 5~7개), thesis(논문 전체를 관통하는 핵심 주장 한 문장), "
         "advice(선행연구에 비추어 이 경로에서 보완하면 좋을 점 2~3문장, 연구자가 정하지 않은 부분은 무엇을 정해야 하는지).",
         system=SYS,
         schema=ROUTE_SCHEMA,
@@ -269,14 +271,17 @@ def parse_claims(text):
     return claims
 
 
-def write_section(topic, route, section, log):
+def write_section(topic, route, section, log, prev=""):
     query = f"{topic} {section} {route.get('name', '')}"
     srcs = pdfindex.search(query, k=6, per_paper=2)
     if not srcs:
         return f"<h2>{html.escape(section)}</h2><p>{need_span('(라이브러리에 관련 자료가 없어 작성하지 못했습니다 — 자료를 먼저 수집하세요)')}</p>"
     block = "\n\n".join(f"[{i + 1}] {c['cite']}\n{c['text'][:600]}" for i, c in enumerate(srcs))
     text = llm.chat(
-        f"논문 주제: {topic}\n연구 방법: {route.get('method', '')}\n지금 쓸 장: {section}\n\n"
+        f"논문 주제: {topic}\n연구문제: {' / '.join(route.get('questions', []))}\n"
+        f"논문의 한 줄기(핵심 주장): {route.get('thesis') or '(연구문제에 답하는 것)'}\n"
+        f"목차: {' → '.join(route.get('outline', []))}\n연구 방법: {route.get('method', '')}\n지금 쓸 장: {section}\n"
+        f"앞 장의 마지막 내용: {prev or '(첫 장)'}\n\n"
         f"[자료]\n{block}\n\n"
         "위 자료만 사용해서 이 장의 본문을 학술 논문 문체(~이다, ~하였다)의 한국어로 5~8문장 쓰세요.\n"
         "규칙:\n"
@@ -285,7 +290,8 @@ def write_section(topic, route, section, log):
         "   문장은 반드시 '~이다', '~하였다', '~나타났다'로 끝내고 '~합니다'는 쓰지 마세요.\n"
         "2. 자료에 없는 사실·수치·연도는 절대 지어내지 마세요.\n"
         "3. 저자 이름이나 (저자, 연도) 표기는 쓰지 마세요. 번호만 붙이면 됩니다.\n"
-        "4. 문장들이 자연스럽게 이어지는 하나의 글이 되게 하세요.\n"
+        "4. 첫 문장은 이 장의 중심 내용을 요약하는 중심 문장으로 쓰고, 이어지는 문장이 그것을 뒷받침하게 하세요. "
+        "앞 장과 자연스럽게 이어지고, 이 장이 연구문제와 논문의 한 줄기에 어떻게 기여하는지 드러나게 쓰세요(주제와 상관없는 내용은 빼기).\n"
         "5. 자료가 부족해서 이 장에서 쓰지 못한 내용이 있으면, 본문이 다 끝난 뒤 맨 마지막 줄에 '[메모]'로 시작하는 한 줄로만 알려주세요. 그 밖의 설명은 쓰지 마세요.",
         system=SYS,
         num_ctx=6144,
@@ -330,11 +336,14 @@ def write(project_id, sections, log, stop, emit):
     pr = db.q("SELECT * FROM projects WHERE id=?", (project_id,), one=True)
     p = json.loads(pr["plan"])
     route = p["routes"][pr["route"] or 0]
+    prev = ""
     for i, sec in enumerate(sections):
         if stop():
             break
         log(f"[{i + 1}/{len(sections)}] '{sec}' 집필 중…")
-        emit(write_section(pr["topic"], route, sec, log))
+        out = write_section(pr["topic"], route, sec, log, prev)
+        emit(out)
+        prev = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", out.split('<p class="ai-note"')[0])).strip()[-300:]
     log("집필 완료")
 
 

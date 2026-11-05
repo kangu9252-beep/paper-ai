@@ -223,3 +223,31 @@ a.btnlink { display: inline-block; padding: 7px 14px; border-radius: 8px; backgr
   font-weight: 600; text-decoration: none; border: 1px solid var(--accent); }
 a.btnlink.ghostlink { background: transparent; border-color: var(--line); color: var(--text); }
 dialog.wizard code { background: var(--surface-2); padding: 1px 5px; border-radius: 4px; }
+
+/* 예비심사 리뷰 */
+.memo.rv .dot { background: var(--accent-soft); color: var(--accent); }
+.memo.rv .dot b { background: transparent; font-size: 13px; }
+.memo.rv .dot:hover { border-color: var(--accent); }
+.memo.rv .box { border-color: var(--accent); max-height: 340px; overflow: auto; }
+.memo.rv .rvn + .rvn { border-top: 1px solid var(--line); margin-top: 8px; padding-top: 8px; }
+.memo.rv .rvn .row { margin-top: 6px; }
+.paper [data-review] { border-left: 3px solid var(--accent); padding-left: 8px; margin-left: -11px; }
+.paper [data-review].active, .paper .flash { background: var(--accent-soft); transition: background .3s; }
+.badge.sev-중요 { background: var(--warn); color: #fff; }
+.badge.sev-보통 { background: #c98a00; color: #fff; }
+.badge.sev-사소 { background: var(--surface-2); color: var(--muted); }
+.sv-thread { background: var(--accent-soft); border-left: 3px solid var(--accent); padding: 10px 12px; border-radius: 0 8px 8px 0; margin-top: 8px; }
+.sv-map { margin-top: 10px; }
+.sv-map summary { cursor: pointer; }
+.sv-sec { border-left: 2px solid var(--line); margin: 8px 0 0 6px; padding: 0 0 4px 12px; position: relative; }
+.sv-sec::before { content: ""; position: absolute; left: -6px; top: 4px; width: 10px; height: 10px; border-radius: 50%; background: var(--accent); }
+.sv-h { font-weight: 700; font-size: 13px; }
+.sv-claim { font-size: 13px; margin: 2px 0 4px; }
+.sv-paras { display: flex; flex-wrap: wrap; gap: 4px; }
+.sv-p { font-size: 11px; padding: 1px 7px; border-radius: 99px; background: var(--surface-2); border: 1px solid var(--line); cursor: pointer; }
+.sv-p:hover { border-color: var(--accent); }
+.sv-p.bad { border-color: var(--warn); color: var(--warn); }
+.sv-p.bad::before { content: "● "; }
+.badge.rq-ok { background: var(--accent); }
+.badge.rq-warn { background: #c98a00; }
+.badge.rq-need { background: var(--warn); }
