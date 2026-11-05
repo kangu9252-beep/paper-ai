@@ -29,6 +29,41 @@ def is_reflist(text):
     return years / max(1, len(text) / 100) > 0.9 or dois >= 3
 
 
+OCR_DPI = 200
+
+
+def _ocr_lines(page):
+    """스캔본 쪽: Windows 내장 글자 인식(한국어)으로 줄과 위치를 얻는다. 못 하면 []."""
+    try:
+        import io as _io
+
+        import winocr
+        from PIL import Image
+    except Exception:
+        return []
+    pix = page.get_pixmap(dpi=OCR_DPI)
+    try:
+        r = winocr.recognize_pil_sync(Image.open(_io.BytesIO(pix.tobytes("png"))), "ko")
+    except Exception:
+        return []
+    k = 72 / OCR_DPI
+    out, prev = [], None
+    for ln in r.get("lines", []):
+        ws = [w["bounding_rect"] for w in ln.get("words", [])]
+        t = (ln.get("text") or "").strip()
+        if not ws or not t:
+            continue
+        x0 = min(w["x"] for w in ws) * k
+        y0 = min(w["y"] for w in ws) * k
+        x1 = max(w["x"] + w["width"] for w in ws) * k
+        y1 = max(w["y"] + w["height"] for w in ws) * k
+        if prev and (y0 < prev[1] - 2 or y0 - prev[3] > (prev[3] - prev[1]) * 1.2):
+            out.append(None)  # 단 바뀜이나 문단 사이 간격 → 블록 경계
+        out.append((t, (x0, y0, x1, y1)))
+        prev = (x0, y0, x1, y1)
+    return out
+
+
 def extract_chunks(path):
     doc = pymupdf.open(path)
     out, in_refs = [], False
@@ -53,6 +88,13 @@ def extract_chunks(path):
                 break
             lines.extend(blines)
             lines.append(None)  # 블록 경계
+        if not in_refs and sum(len(x[0]) for x in lines if x) < 30 and page.get_images():
+            ocr = _ocr_lines(page)  # 글자가 없는 스캔본 쪽
+            for item in ocr:
+                if item and REF_HEAD.match(item[0]) and pno >= len(doc) * 0.4:
+                    in_refs = True
+                    break
+                lines.append(item)
         cur, cur_len = [], 0
         for item in lines + [None]:
             if item is None:
@@ -159,10 +201,10 @@ def guess_meta(path, chunks):
 def index_pdf(path, meta=None, source="local", log=print):
     path = str(Path(path).resolve())
     mtime = os.path.getmtime(path)
-    old = db.q("SELECT id, mtime, title, authors, year, doi, venue FROM papers WHERE path=?", (path,), one=True)
-    if old and meta is None and old["title"]:  # 다시 읽을 때 사용자가 고친 인용 정보 유지
+    old = db.q("SELECT id, mtime, title, authors, year, doi, venue, status FROM papers WHERE path=?", (path,), one=True)
+    if old and meta is None and old["title"] and old["status"] == "ok":  # 다시 읽을 때 사용자가 고친 인용 정보 유지
         meta = {**old, "authors": json.loads(old["authors"] or "[]")}
-    if old and abs((old["mtime"] or 0) - mtime) < 1:
+    if old and abs((old["mtime"] or 0) - mtime) < 1 and old["status"] != "notext":  # notext: 글자 인식 전 스캔본 → 다시 읽기
         return old["id"]
     try:
         chunks, npages = extract_chunks(path)
@@ -170,9 +212,9 @@ def index_pdf(path, meta=None, source="local", log=print):
         log(f"  읽기 실패: {Path(path).name} ({e})")
         return None
     total = sum(len(c["text"]) for c in chunks)
-    status = "ok" if total > 300 else "notext"
+    status = "ok" if total > 300 else "noocr"  # noocr: 글자 인식으로도 못 읽음
     if meta is None:
-        meta = guess_meta(path, chunks) if status == "ok" else {"title": Path(path).stem, "authors": [], "year": "", "doi": ""}
+        meta = guess_meta(path, chunks) if status == "ok" else (meta_from_name(path) or {"title": Path(path).stem, "authors": [], "year": "", "doi": ""})
     if old:
         pid = old["id"]
         db.x("DELETE FROM chunks WHERE paper_id=?", (pid,))
@@ -227,9 +269,17 @@ def scan_folders(folders, log=print, stop=lambda: False):
                         pass
     found = list(dict.fromkeys(str(Path(p).resolve()) for p in found))
     known = {r["path"]: r["mtime"] for r in db.q("SELECT path, mtime FROM papers")}
-    todo = [p for p in found if p not in known or abs(known[p] - os.path.getmtime(p)) >= 1]
-    log(f"PDF {len(found)}개 발견, 새로 읽을 것 {len(todo)}개")
+    retry = {r["path"] for r in db.q("SELECT path FROM papers WHERE status='notext'")}  # 스캔본 → 글자 인식으로 다시
+    todo = [p for p in found if p not in known or p in retry or abs(known[p] - os.path.getmtime(p)) >= 1]
+    # 파일 이름에 저자(연도)가 있는 논문 먼저 (AI 없이 빨리 읽힘) → 바로 검색되게 한 뒤 나머지
+    quick = lambda p: (m := meta_from_name(p)) is not None and not NOTE_RE.search(m["title"])
+    todo.sort(key=lambda p: not quick(p))
+    n_quick = sum(1 for p in todo if quick(p))
+    log(f"PDF {len(found)}개 발견, 새로 읽을 것 {len(todo)}개 (이름에 저자·연도가 있는 {n_quick}개 먼저)")
     for i, p in enumerate(todo):
+        if i == n_quick and n_quick:
+            log("먼저 읽은 논문을 검색할 수 있게 정리하는 중…")
+            embed_missing(log=log)
         if stop():
             break
         log(f"[{i + 1}/{len(todo)}] {Path(p).name}")

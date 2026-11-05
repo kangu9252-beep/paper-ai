@@ -8,3 +8,5 @@ python-multipart
 anthropic
 beautifulsoup4
 python-docx
+winocr
+pillow
