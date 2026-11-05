@@ -21,7 +21,7 @@ JOBS = {}
 
 # ---------- 백그라운드 작업 ----------
 class Job:
-    def __init__(self, kind, fn, engine="local"):
+    def __init__(self, kind, fn, engine="local", pid=None, feature=None):
         self.id = uuid.uuid4().hex[:10]
         self.kind, self.status, self.log, self.result, self.emitted, self.stopped = kind, "running", [], None, [], False
         JOBS[self.id] = self
@@ -35,6 +35,8 @@ class Job:
             try:
                 self.result = fn(self)
                 self.status = "stopped" if self.stopped else "done"
+                for f in (FULL_REVIEW if feature == "full" else [feature]):
+                    llm.log_use(pid, f)
             except Exception as e:
                 traceback.print_exc()
                 self.log.append(f"오류: {e}")
@@ -47,6 +49,9 @@ class Job:
 
     def stop(self):
         return self.stopped
+
+
+FULL_REVIEW = ["structure", "cites", "uncited", "recent", "discuss"]  # 전체 검토 중 AI를 쓰는 도구
 
 
 def job_out(j):
@@ -154,7 +159,7 @@ def make_plan(pid: int, d: dict = Body(default={})):
         db.x("UPDATE projects SET plan=?, route=? WHERE id=?", (json.dumps(p, ensure_ascii=False), rec, pid))
         return {"ok": True}
 
-    return {"job": Job("plan", fn, llm.engine_for(pid)).id}
+    return {"job": Job("plan", fn, llm.engine_for(pid), pid, "plan").id}
 
 
 @app.post("/api/projects/{pid}/route_add")
@@ -171,7 +176,7 @@ def route_add(pid: int, d: dict = Body(...)):
         db.x("UPDATE projects SET plan=?, route=? WHERE id=?", (json.dumps(p, ensure_ascii=False), len(p["routes"]) - 1, pid))
         return {"ok": True}
 
-    return {"job": Job("route", fn, llm.engine_for(pid)).id}
+    return {"job": Job("route", fn, llm.engine_for(pid), pid, "route").id}
 
 
 @app.post("/api/projects/{pid}/route_del")
@@ -189,13 +194,13 @@ def route_del(pid: int, d: dict = Body(...)):
 def collect(pid: int, d: dict = Body(...)):
     route = int(d.get("route", 0))
     db.x("UPDATE projects SET route=? WHERE id=?", (route, pid))
-    return {"job": Job("collect", lambda j: agent.collect(pid, route, j.say, j.stop), llm.engine_for(pid)).id}
+    return {"job": Job("collect", lambda j: agent.collect(pid, route, j.say, j.stop), llm.engine_for(pid), pid, "collect").id}
 
 
 @app.post("/api/projects/{pid}/write")
 def write(pid: int, d: dict = Body(...)):
     secs = d.get("sections") or []
-    return {"job": Job("write", lambda j: agent.write(pid, secs, j.say, j.stop, j.emitted.append), llm.engine_for(pid)).id}
+    return {"job": Job("write", lambda j: agent.write(pid, secs, j.say, j.stop, j.emitted.append), llm.engine_for(pid), pid, "write").id}
 
 
 # ---------- 라이브러리 ----------
@@ -298,7 +303,7 @@ def pdf(pid: int):
 
 @app.post("/api/autofind")
 def autofind(d: dict = Body(...)):
-    return {"job": Job("autofind", lambda j: agent.autofind(d.get("sentence", ""), d.get("author", ""), d.get("year", ""), j.say), llm.engine_for(d.get("project_id"))).id}
+    return {"job": Job("autofind", lambda j: agent.autofind(d.get("sentence", ""), d.get("author", ""), d.get("year", ""), j.say), llm.engine_for(d.get("project_id")), d.get("project_id"), "autofind").id}
 
 
 @app.post("/api/references")
@@ -369,12 +374,19 @@ def run_review(pid: int, tool: str):
     if tool != "full" and tool not in review.TOOLS:
         raise HTTPException(404)
     fn = review.full_review if tool == "full" else review.TOOLS[tool]
-    return {"job": Job("review", lambda j: fn(pid, j.say, j.stop), llm.engine_for(pid)).id}
+    feature = None if tool == "refs" else tool  # 참고문헌 대조는 AI를 쓰지 않음
+    return {"job": Job("review", lambda j: fn(pid, j.say, j.stop), llm.engine_for(pid), pid, feature).id}
+
+
+@app.get("/api/projects/{pid}/ai_usage")
+def ai_usage(pid: int):
+    return review.ai_usage(pid)
 
 
 @app.post("/api/projects/{pid}/insert")
 def insert_sentence(pid: int, d: dict = Body(...)):
     review.insert_discussion(pid, d.get("sentence", ""), d.get("chunk_id"), d.get("quote", ""), d.get("label", "(출처 필요)"))
+    db.x("INSERT INTO ai_log(project_id, feature, engine, model) VALUES(?, 'discuss_insert', '', '')", (pid,))
     return {"ok": True}
 
 
