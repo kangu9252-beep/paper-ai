@@ -42,6 +42,10 @@ CREATE TABLE IF NOT EXISTS usage (
   id INTEGER PRIMARY KEY, ts TEXT DEFAULT (datetime('now','localtime')),
   model TEXT, input INTEGER, output INTEGER
 );
+CREATE TABLE IF NOT EXISTS ai_log (
+  id INTEGER PRIMARY KEY, project_id INTEGER, feature TEXT, engine TEXT, model TEXT,
+  ts TEXT DEFAULT (datetime('now','localtime'))
+);
 CREATE TABLE IF NOT EXISTS schedule (
   id INTEGER PRIMARY KEY,
   project_id INTEGER, kind TEXT, args TEXT DEFAULT '{}',

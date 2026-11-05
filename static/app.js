@@ -454,6 +454,7 @@ function renderWrite() {
       <button id="aiWriteNight" title="오늘 밤 로컬 AI로 무료 처리">🌙 새벽 집필 예약</button>
       <button id="autoAll">🤖 출처 필요(?) 모두 자동 찾기</button>
       <button id="refsBtn">📑 참고문헌 만들기</button>
+      <button id="aiDraftBtn" class="aidraft-btn" style="display:none" title="AI가 쓴 문장을 아직 고치지 않은 문단 — 누르면 차례로 이동해요"></button>
       <span class="hint" id="saveState">(저자, 연도)로 쓰면 자동 인식 · 인용을 누르면 원문 위치</span>
     </div>
     <div class="desk"><div class="paper" id="editor" contenteditable="true" spellcheck="false"></div><div class="margin" id="margin"></div></div>`;
@@ -467,7 +468,7 @@ function renderWrite() {
   normalizeCites();
   editor.addEventListener("compositionstart", () => (composing = true));
   editor.addEventListener("compositionend", () => { composing = false; scheduleDetect(); });
-  editor.addEventListener("input", () => { scheduleDetect(); scheduleSave(); layoutMemos(); });
+  editor.addEventListener("input", () => { scheduleDetect(); scheduleSave(); layoutMemos(); clearTimeout(aiT); aiT = setTimeout(checkAiDrafts, 800); });
   editor.addEventListener("blur", () => detectCites(true));
   editor.addEventListener("click", (e) => {
     const c = e.target.closest(".cite");
@@ -484,7 +485,52 @@ function renderWrite() {
   $("#aiWriteNight").onclick = () => aiWriteDialog(true);
   $("#autoAll").onclick = autoAll;
   $("#refsBtn").onclick = makeRefs;
+  $("#aiDraftBtn").onclick = () => {
+    const list = $$("p.ai-draft", editor);
+    if (!list.length) return;
+    aiIdx = (aiIdx + 1) % list.length;
+    const el = list[aiIdx];
+    el.scrollIntoView({ block: "center", behavior: "smooth" });
+    el.classList.add("flash");
+    setTimeout(() => el.classList.remove("flash"), 1600);
+  };
+  checkAiDrafts();
   requestAnimationFrame(layoutMemos);
+}
+
+// ---------- AI 초안 표시: 내 말로 고쳐 쓰면 색이 사라짐 ----------
+let aiT = null, aiIdx = -1;
+function bigrams(t) {
+  const x = t.replace(/[\s.,;:!?'"“”‘’()\[\]·…-]/g, "");
+  const out = new Set();
+  for (let i = 0; i < x.length - 1; i++) out.add(x.slice(i, i + 2));
+  return out;
+}
+function plainText(el) {
+  const c = el.cloneNode(true);
+  c.querySelectorAll(".cite").forEach((x) => x.remove());
+  return c.textContent;
+}
+function checkAiDrafts() {
+  if (!editor) return;
+  let changed = false;
+  $$("p.ai-draft", editor).forEach((el) => {
+    const cur = bigrams(plainText(el));
+    if (!el.dataset.ai || cur.size < 4) { el.classList.remove("ai-draft"); delete el.dataset.ai; changed = true; return; }
+    const orig = bigrams(el.dataset.ai);
+    let same = 0;
+    cur.forEach((b) => { if (orig.has(b)) same++; });
+    if (same / cur.size < 0.5) {  // 절반 넘게 내 글로 바뀌면 '고쳐 씀'
+      el.classList.remove("ai-draft");
+      delete el.dataset.ai;
+      el.removeAttribute("title");
+      changed = true;
+    } else el.title = "AI가 쓴 초안이에요 — 내 말로 고쳐 쓰면 색이 사라져요";
+  });
+  const n = $$("p.ai-draft", editor).length;
+  const b = $("#aiDraftBtn");
+  if (b) { b.style.display = n ? "" : "none"; b.textContent = `🤖 AI 초안 그대로 ${n}문단`; }
+  if (changed) scheduleSave();
 }
 
 function normalizeCites() {
@@ -745,6 +791,7 @@ async function aiWriteDialog(night) {
       }
       editor.insertAdjacentHTML("beforeend", html);
       normalizeCites();
+      checkAiDrafts();
       layoutMemos();
       scheduleSave();
     },
@@ -888,7 +935,11 @@ async function renderReview() {
         ${r.status === "waiting" ? `<button class="small ghost" data-unsched="${r.id}">취소</button>` : ""}</div>`).join("")}
       ${sched.task !== "registered" ? `<p class="small" style="color:var(--warn);margin-bottom:0">새벽에 컴퓨터가 앱을 자동으로 켜게 하려면 ⚙ 설정 → '새벽 자동 실행 등록'을 눌러주세요. 등록하지 않으면 앱이 켜져 있을 때만 실행돼요.</p>` : ""}</div>` : ""}
     ${TOOL_INFO.map(card).join("")}
+    <div class="card" id="aiUse"><h3>🧾 AI 사용 기록 · 투고용 공개 문구</h3>
+      <p class="small muted" style="margin:2px 0 8px">이 원고에 어떤 AI 기능을 언제 썼는지 자동으로 기록해 두었어요. 학술지에 낼 때 아래 'AI 사용 명시' 문구를 투고 규정에 맞게 고쳐 쓰세요. (학술지·학교마다 규정이 달라요)</p>
+      <div id="aiUseBody" class="small muted">불러오는 중…</div></div>
   </div>`;
+  loadAiUse(p);
 
   // 불러오기
   $("#impFile").onclick = () => $("#impInput").click();
@@ -942,6 +993,26 @@ async function renderReview() {
     b.disabled = true;
     const { job } = await api("/api/fetch_work", { json: w });
     runJob(job, "논문 내려받는 중", { onDone: (r) => { b.textContent = r?.paper ? "내 자료에 추가됨 ✓" : "받지 못했어요"; } });
+  }));
+}
+
+async function loadAiUse(p) {
+  const el = $("#aiUseBody");
+  let u;
+  try { u = await api(`/api/projects/${p.id}/ai_usage`); } catch { el.textContent = "기록을 불러오지 못했어요"; return; }
+  const eng = (r) => r.engine === "claude" ? "Claude" : r.engine === "local" ? "로컬 AI" : "—";
+  const warn = u.drafts ? `<div class="rv-item warn"><b class="st">⚠</b> 아직 <b>AI 초안 그대로인 문단이 ${u.drafts}개</b> 있어요. ③ 집필에서 보라색 문단을 내 말로 고쳐 쓰거나, 공개 문구에 초안 작성 사실을 밝혀 주세요.</div>` : "";
+  if (!u.rows.length) { el.innerHTML = warn + "아직 이 원고에서 AI 기능을 쓴 기록이 없어요."; return; }
+  const box = (id, t, v) => `<div class="small muted" style="margin-top:10px">${t}</div>
+    <textarea id="${id}" rows="4" style="width:100%">${esc(v)}</textarea><button class="small" data-copy="${id}">📋 복사</button>`;
+  el.classList.remove("muted");
+  el.innerHTML = warn + `<table class="aiuse"><tr><th>기능</th><th>엔진</th><th>횟수</th><th>마지막 사용</th></tr>
+    ${u.rows.map((r) => `<tr><td>${esc(r.label)}</td><td>${eng(r)}${r.model ? ` <span class="muted">${esc(r.model)}</span>` : ""}</td><td>${r.n}</td><td>${esc(r.last.slice(0, 16))}</td></tr>`).join("")}</table>
+    ${box("aiKo", "공개 문구 (한국어)", u.ko)}${box("aiEn", "Disclosure statement (English)", u.en)}`;
+  $$("[data-copy]", el).forEach((b) => (b.onclick = async () => {
+    const t = $("#" + b.dataset.copy);
+    try { await navigator.clipboard.writeText(t.value); } catch { t.select(); document.execCommand("copy"); }
+    toast("복사했어요");
   }));
 }
 

@@ -429,7 +429,9 @@ def insert_discussion(pid, sentence, chunk_id, quote, label):
     """논의 장 끝(없으면 원고 끝)에 근거 달린 문장을 넣는다."""
     p, soup = load(pid)
     sp = f'<span class="cite{"" if chunk_id else " need"}" contenteditable="false"' + (f' data-chunk="{int(chunk_id)}" data-quote="{html.escape(quote or "", quote=True)}"' if chunk_id else "") + f">{html.escape(label)}</span>"
-    para = BeautifulSoup(f"<p>{html.escape(sentence.rstrip('.'))} {sp}.</p>", "html.parser")
+    para = BeautifulSoup(
+        f'<p class="ai-draft" data-ai="{html.escape(sentence, quote=True)}">{html.escape(sentence.rstrip("."))} {sp}.</p>', "html.parser"
+    )
     heads = soup.find_all(["h1", "h2", "h3"])
     disc = next((i for i, h in enumerate(heads) if DISC_HEAD.search(h.get_text())), None)
     refs = next((h for h in heads if REF_HEAD.search(h.get_text())), None)
@@ -785,3 +787,61 @@ def full_review(pid, log, stop=lambda: False):
             TOOLS[name](pid, log, stop)
         except Exception as e:
             log(f"  {name} 실패: {e}")
+
+
+# ---------- AI 사용 기록 · 공개 문구 ----------
+FEATURES = {
+    "plan": ("연구계획·선행연구 정리", "lit"),
+    "route": ("연구 경로 정리", "lit"),
+    "collect": ("자료 수집", "lit"),
+    "recent": ("최신 연구 찾기", "lit"),
+    "autofind": ("인용 근거 찾기", "cite"),
+    "cites": ("인용 전체 점검", "cite"),
+    "uncited": ("근거 없는 문장 찾기", "cite"),
+    "structure": ("예비심사 리뷰(구조 점검)", "struct"),
+    "write": ("본문 초안 작성", "draft"),
+    "discuss": ("논의 보강 제안", "draft"),
+    "discuss_insert": ("AI 제안 문장을 논의에 넣음", "draft"),
+}
+PURPOSE = {
+    "lit": ("선행연구 탐색과 정리", "literature search and organization"),
+    "cite": ("인용 근거 확인", "verification of citations against source texts"),
+    "struct": ("원고의 논리 구조 점검", "checking the logical structure of the manuscript"),
+    "draft": ("일부 문장의 초안 작성", "drafting of some sentences"),
+}
+
+
+def ai_usage(pid):
+    p, soup = load(pid)
+    rows = db.q(
+        "SELECT feature, engine, model, COUNT(*) n, MIN(ts) first, MAX(ts) last FROM ai_log WHERE project_id=? GROUP BY feature, engine, model ORDER BY MIN(ts)",
+        (pid,),
+    )
+    for r in rows:
+        r["label"] = FEATURES.get(r["feature"], (r["feature"], ""))[0]
+    drafts = len(soup.select("p.ai-draft"))
+    kinds = [k for k in PURPOSE if any(FEATURES.get(r["feature"], ("", ""))[1] == k for r in rows)]
+    tools_ko, tools_en = [], []
+    for eng, model in sorted({(r["engine"], r["model"]) for r in rows if r["engine"]}):
+        if eng == "claude":
+            tools_ko.append(f"Anthropic Claude({model})")
+            tools_en.append(f"Anthropic Claude ({model})")
+        else:
+            tools_ko.append(f"로컬 언어모델 {model}(Ollama)")
+            tools_en.append(f"a locally run language model, {model} (Ollama)")
+    if not kinds:
+        return {"rows": rows, "drafts": drafts, "ko": "", "en": ""}
+    used_draft = "draft" in kinds or drafts > 0
+    ko = (
+        f"본 연구는 {', '.join(PURPOSE[k][0] for k in kinds)}에 인공지능 도구인 {', '.join(tools_ko) or 'AI 도구'}를 보조적으로 활용하였다. "
+        "AI가 제시한 문헌과 인용은 모두 연구자가 원문과 대조하여 확인하였다. "
+        + ("AI가 작성한 초안은 연구자가 검토하고 수정하였다. " if used_draft else "")
+        + "연구의 설계, 자료 분석과 해석, 최종 원고의 내용에 대한 책임은 연구자에게 있다."
+    )
+    en = (
+        f"AI tools, namely {' and '.join(tools_en) or 'general-purpose AI tools'}, were used to assist with {', '.join(PURPOSE[k][1] for k in kinds)}. "
+        "All literature and citations suggested by AI were checked by the author against the original sources. "
+        + ("Drafts produced by AI were reviewed and revised by the author. " if used_draft else "")
+        + "The author is fully responsible for the study design, data analysis and interpretation, and the content of the final manuscript."
+    )
+    return {"rows": rows, "drafts": drafts, "ko": ko, "en": en}

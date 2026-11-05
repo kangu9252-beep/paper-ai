@@ -55,6 +55,11 @@ def _run_one(row):
         elif row["kind"] == "review":
             tool = args.get("tool", "full")
             (review.full_review if tool == "full" else review.TOOLS[tool])(pid, log)
+        tool = args.get("tool", "full")
+        feats = [row["kind"]] if row["kind"] != "review" else (["structure", "cites", "uncited", "recent", "discuss"] if tool == "full" else [tool])
+        for f in feats:
+            if f != "refs":
+                llm.log_use(pid, f)
         db.x("UPDATE schedule SET status='done' WHERE id=?", (row["id"],))
     except Exception as e:
         traceback.print_exc()

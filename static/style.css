@@ -251,3 +251,10 @@ dialog.wizard code { background: var(--surface-2); padding: 1px 5px; border-radi
 .badge.rq-ok { background: var(--accent); }
 .badge.rq-warn { background: #c98a00; }
 .badge.rq-need { background: var(--warn); }
+
+/* AI 초안 표시 */
+.paper p.ai-draft { background: color-mix(in srgb, #8b6cf0 9%, transparent); box-shadow: inset 3px 0 0 #8b6cf0; padding-left: 10px; margin-left: -13px; border-radius: 0 6px 6px 0; }
+.aidraft-btn { color: #6b4fd8; border-color: #b9a8f5; }
+table.aiuse { width: 100%; border-collapse: collapse; font-size: 13px; }
+table.aiuse th, table.aiuse td { text-align: left; padding: 4px 6px; border-bottom: 1px solid var(--line); }
+table.aiuse th { color: var(--muted); font-weight: 600; }

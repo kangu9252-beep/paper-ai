@@ -109,6 +109,15 @@ def reset_embed_check():
     _embed_ok = None
 
 
+def log_use(project_id, feature):
+    """AI 사용 내역 기록 (투고 시 'AI 사용 명시' 문구의 근거)."""
+    if not project_id or not feature:
+        return
+    eng = engine()
+    model = CLAUDE_MODEL if eng == "claude" else db.get_settings()["model"]
+    db.x("INSERT INTO ai_log(project_id, feature, engine, model) VALUES(?, ?, ?, ?)", (project_id, feature, eng, model))
+
+
 # ---------- Claude (인터넷) ----------
 _client = None
 _client_key = None

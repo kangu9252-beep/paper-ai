@@ -304,6 +304,7 @@ def write_section(topic, route, section, log, prev=""):
     if m:
         note = re.sub(r"^\s*(?:\[메모\]|-{3,}|참고\s*:|※)\s*", "", text[m.start():]).strip()
         note = re.sub(r"\[(\d+)\]", lambda x: srcs[int(x.group(1)) - 1]["cite"] if 0 < int(x.group(1)) <= len(srcs) else "", re.sub(r"\s+", " ", note))
+        note = re.sub(r"(\([^()]+\))(?:\s*\1)+", r"\1", note)  # 같은 인용이 겹쳐 붙은 것 정리
         text = text[: m.start()]
     claims = parse_claims(text)
     if not claims:
@@ -329,7 +330,8 @@ def write_section(topic, route, section, log, prev=""):
     memo = f'<p class="ai-note" contenteditable="false">💬 AI 메모: {html.escape(note)} <small>(확인 후 지워주세요)</small></p>' if note else ""
     if note:
         log(f"  ※ AI 메모: {note[:120]}")
-    return f"<h2>{html.escape(section)}</h2><p>{' '.join(parts)}</p>{memo}"
+    draft = html.escape(" ".join(s for s, _ in claims), quote=True)
+    return f'<h2>{html.escape(section)}</h2><p class="ai-draft" data-ai="{draft}">{" ".join(parts)}</p>{memo}'
 
 
 def write(project_id, sections, log, stop, emit):
