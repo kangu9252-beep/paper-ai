@@ -577,12 +577,17 @@ function detectCites(force) {
   const sel = getSelection();
   let caretNode = sel.rangeCount ? sel.anchorNode : null;
   const caretOff = sel.anchorOffset;
+  // 참고문헌 목록은 인용이 아니므로 표시하지 않음 (잘못 붙은 것은 글자로 되돌림)
+  const refHead = $$("h1, h2, h3, h4", editor).find((h) => /^\s*(참\s*고\s*문\s*헌|references?|bibliography|인용\s*문헌)\s*$/i.test(h.textContent));
+  const inRefs = (n) => refHead && (refHead.compareDocumentPosition(n) & Node.DOCUMENT_POSITION_FOLLOWING);
+  const stray = refHead ? $$(".cite:not([data-chunk])", editor).filter(inRefs) : [];
+  stray.forEach((c) => c.replaceWith(c.textContent));
   const walker = document.createTreeWalker(editor, NodeFilter.SHOW_TEXT, {
-    acceptNode: (n) => (n.parentElement.closest(".cite") ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT),
+    acceptNode: (n) => (n.parentElement.closest(".cite") || inRefs(n) ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT),
   });
   const nodes = [];
   while (walker.nextNode()) nodes.push(walker.currentNode);
-  let changed = false;
+  let changed = stray.length > 0;
   for (const node of nodes) {
     const ms = findCites(node.data);
     for (let i = ms.length - 1; i >= 0; i--) {

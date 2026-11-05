@@ -199,6 +199,12 @@ def cite_sentence(el):
 
 
 def all_cites(soup):
+    # 참고문헌 목록 안에 잘못 붙은 인용 표시는 글자로 되돌림
+    head = next((h for h in soup.find_all(["h1", "h2", "h3", "h4"]) if re.fullmatch(r"\s*(?:" + REF_HEAD.pattern + r")\s*", h.get_text(), re.I)), None)
+    if head:
+        for c in head.find_all_next("span", class_="cite"):
+            if not c.get("data-chunk"):
+                c.replace_with(c.get_text())
     cites = soup.find_all("span", class_="cite")
     n = max([int(c.get("data-cid")) for c in cites if (c.get("data-cid") or "").isdigit()] + [0])
     for c in cites:

@@ -88,6 +88,30 @@ def _mk(pno, pw, ph, items):
 DOI_RE = re.compile(r"\b(10\.\d{4,9}/[^\s\"<>,;]+)", re.I)
 
 
+NAME_RE = re.compile(
+    r"^(?:\[[^\]]*\]\s*)?(?:\d{1,3}[\s._-]+)?"  # [IV] 같은 꼬리표, 02 같은 번호
+    r"(?P<a>[가-힣A-Za-z][^()\[\]]{0,60}?)\s*\(\s*(?P<y>(?:19|20)\d{2})[a-z]?\s*\)\s*(?P<t>.*)$"
+)
+
+
+NOTE_RE = re.compile(r"α|문항|\d점|공개본|번안|원척도|척도\s*원문|\bitem", re.I)  # 파일 이름이 제목이 아니라 메모일 때
+# 내 원고·과제·결과지 등 근거로 쓰면 안 되는 파일
+SKIP_NAME_RE = re.compile(r"카피킬러|결과확인서|수업계획서|랩미팅|제출용|문헌분석표|참고문헌\s*정리|중간고사|기말|초안|^20\d{6}[\s_]")
+
+
+def meta_from_name(path):
+    """'02 김미량·김재운 외(2010) 진지한 여가척도….pdf' 처럼 파일 이름에 저자(연도) 제목이 있으면 그대로 쓴다."""
+    m = NAME_RE.match(Path(path).stem.strip())
+    if not m:
+        return None
+    raw = re.sub(r"\s*(외|등|et\s*al\.?)\s*$", "", m.group("a").strip(" ,_-"))
+    authors = [a.strip() for a in re.split(r"\s*(?:·|,|&|\band\b)\s*", raw) if a.strip()]
+    if not authors or any(len(a) > 30 for a in authors):
+        return None
+    title = re.sub(r"\s*\[[^\]]*\]\.*\s*$", "", m.group("t")).strip(" ._-") or Path(path).stem
+    return {"title": title, "authors": authors[:10], "year": m.group("y"), "doi": ""}
+
+
 def guess_meta(path, chunks):
     first = " ".join(c["text"] for c in chunks if c["page"] < 2)[:6000]
     m = DOI_RE.search(first)
@@ -98,6 +122,9 @@ def guess_meta(path, chunks):
         meta = web.openalex_by_doi(doi)
         if meta:
             return meta
+    named = meta_from_name(path)
+    if named and not NOTE_RE.search(named["title"]):  # 파일 이름이 정보를 주면 AI에게 묻지 않음 (빠르고 정확)
+        return named
     head = " ".join(c["text"] for c in chunks if c["page"] == 0)[:2000]
     if len(head) > 100:
         try:
@@ -116,6 +143,8 @@ def guess_meta(path, chunks):
                 num_ctx=4096,
             )
             yr = re.search(r"(19|20)\d{2}", str(r.get("year", "")))
+            if named:  # 저자·연도는 파일 이름이 더 정확, 제목만 AI가 읽은 것
+                return named | {"title": r.get("title") or named["title"]}
             return {
                 "title": r.get("title") or Path(path).stem,
                 "authors": [a for a in r.get("authors", []) if a][:20],
@@ -173,7 +202,15 @@ def index_pdf(path, meta=None, source="local", log=print):
     return pid
 
 
+def is_own_draft(fn, mine):
+    """내 논문 프로젝트와 제목이 같은 PDF는 내 원고(초안·결과본)로 보고 근거에서 뺀다."""
+    k = re.sub(r"\W", "", Path(fn).stem)
+    return SKIP_NAME_RE.search(fn) or any(t and t in k for t in mine)
+
+
 def scan_folders(folders, log=print, stop=lambda: False):
+    mine = {re.sub(r"\W", "", r["t"] or "")[:18] for r in db.q("SELECT title t FROM projects UNION SELECT topic FROM projects")}
+    mine = {t for t in mine if len(t) >= 12}
     found = []
     for f in folders:
         if not os.path.isdir(f):
@@ -181,7 +218,7 @@ def scan_folders(folders, log=print, stop=lambda: False):
         for dirpath, dirnames, files in os.walk(f):
             dirnames[:] = [d for d in dirnames if not d.startswith(".") and d not in ("node_modules", "AppData", ".venv")]
             for fn in files:
-                if fn.lower().endswith(".pdf"):
+                if fn.lower().endswith(".pdf") and not is_own_draft(fn, mine):
                     p = os.path.join(dirpath, fn)
                     try:
                         if os.path.getsize(p) < 80 * 1024 * 1024:
@@ -197,12 +234,14 @@ def scan_folders(folders, log=print, stop=lambda: False):
             break
         log(f"[{i + 1}/{len(todo)}] {Path(p).name}")
         index_pdf(p, log=log)
-    # 지워진 파일 정리
+    # 지워진 파일 정리 — 외장하드가 빠져 있을 때는 지우지 않음
+    offline = [f.lower() for f in folders if not os.path.isdir(f)]
     for path in known:
-        if not os.path.exists(path):
-            r = db.q("SELECT id FROM papers WHERE path=?", (path,), one=True)
-            db.x("DELETE FROM chunks WHERE paper_id=?", (r["id"],))
-            db.x("DELETE FROM papers WHERE id=?", (r["id"],))
+        if os.path.exists(path) or not os.path.exists(Path(path).anchor) or any(path.lower().startswith(f) for f in offline):
+            continue
+        r = db.q("SELECT id FROM papers WHERE path=?", (path,), one=True)
+        db.x("DELETE FROM chunks WHERE paper_id=?", (r["id"],))
+        db.x("DELETE FROM papers WHERE id=?", (r["id"],))
     invalidate()
     return len(todo)
 
@@ -421,6 +460,8 @@ def evidence(chunk_id, quote=""):
 
 def render_page(paper_id, page, zoom=1.6):
     p = db.q("SELECT path FROM papers WHERE id=?", (paper_id,), one=True)
+    if not os.path.exists(p["path"]):
+        raise FileNotFoundError(f"PDF 파일을 찾을 수 없어요. 외장하드에 있는 논문이면 외장하드를 연결해 주세요: {p['path']}")
     doc = pymupdf.open(p["path"])
     pg = doc[max(0, min(page, len(doc) - 1))]
     pix = pg.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom))
