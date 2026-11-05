@@ -380,7 +380,7 @@ def search(query, k=10, paper_ids=None, per_paper=3):
                 cid = int(ids[i])
                 comb[cid] = comb.get(cid, 0) + float(sims[i])
     ranked = sorted(comb.items(), key=lambda kv: -kv[1])
-    out, count = [], {}
+    out, count, seen = [], {}, set()
     for cid, sc in ranked:
         c = db.q(
             "SELECT c.id, c.paper_id, c.page, c.text, p.title, p.authors, p.year FROM chunks c JOIN papers p ON p.id=c.paper_id WHERE c.id=?",
@@ -390,6 +390,10 @@ def search(query, k=10, paper_ids=None, per_paper=3):
             continue
         if count.get(c["paper_id"], 0) >= per_paper:
             continue
+        key = re.sub(r"\s+", "", c["text"])[:300]
+        if key in seen:  # 같은 PDF가 여러 폴더에 있을 때 같은 문단은 한 번만
+            continue
+        seen.add(key)
         count[c["paper_id"]] = count.get(c["paper_id"], 0) + 1
         c["score"] = round(sc, 3)
         c["authors"] = json.loads(c["authors"] or "[]")

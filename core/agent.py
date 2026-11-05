@@ -405,7 +405,8 @@ def autofind(sentence, author, year, log):
         papers = pdfindex.find_papers_by_cite(author, year)
         if papers:
             log(f"내 컴퓨터에서 '{author}, {year}' 논문 발견: {papers[0]['title'][:60]}")
-            hit = _pick(sentence, pdfindex.search(sentence, k=6, paper_ids=[p["id"] for p in papers], per_paper=6))
+            # 인용한 논문 안에서는 더 넓게 본다 (스캔본은 글자 인식 오타로 순위가 밀릴 수 있음)
+            hit = _pick(sentence, pdfindex.search(sentence, k=10, paper_ids=[p["id"] for p in papers], per_paper=10))
             if hit:
                 log("근거 위치 찾음")
                 return {"status": "linked", **hit}
