@@ -12,7 +12,7 @@ from fastapi import Body, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from core import agent, db, library, llm, matrix, night, pdfindex, review, secret
+from core import agent, db, explore, library, llm, matrix, night, pdfindex, review, secret
 
 app = FastAPI()
 STATIC = Path(__file__).parent / "static"
@@ -417,6 +417,36 @@ def matrix_gaps(pid: int):
 @app.post("/api/projects/{pid}/intro")
 def matrix_intro(pid: int):
     return {"job": Job("intro", lambda j: matrix.intro(pid, j.say, j.stop), llm.engine_for(pid), pid, "intro").id}
+
+
+@app.post("/api/projects/{pid}/map")
+def research_map(pid: int):
+    return {"job": Job("map", lambda j: explore.research_map(pid, j.say, j.stop), llm.engine_for(pid), pid, None).id}
+
+
+@app.post("/api/projects/{pid}/meter")
+def meter(pid: int, d: dict = Body(...)):
+    q = (d.get("question") or "").strip()
+    if len(q) < 5:
+        raise HTTPException(400, "질문을 적어주세요")
+    return {"job": Job("meter", lambda j: explore.meter(pid, q, j.say, j.stop), llm.engine_for(pid), pid, "meter").id}
+
+
+@app.post("/api/explain")
+def explain(d: dict = Body(...)):
+    pid = d.get("project_id")
+    return {"job": Job("explain", lambda j: explore.explain(int(d["chunk"]), d.get("quote", ""), j.say), llm.engine_for(pid), pid, "explain").id}
+
+
+@app.post("/api/projects/{pid}/model_suggest")
+def model_suggest(pid: int):
+    return {"job": Job("model", lambda j: explore.model_suggest(pid, j.say), llm.engine_for(pid), pid, "model").id}
+
+
+@app.put("/api/projects/{pid}/model")
+def model_save(pid: int, d: dict = Body(...)):
+    matrix._save_report(pid, "model", {k: d.get(k) for k in explore.MODEL_SCHEMA["properties"]})
+    return {"ok": True}
 
 
 @app.get("/api/projects/{pid}/ai_usage")

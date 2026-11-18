@@ -438,6 +438,27 @@ async function renderMatrix() {
       ${it ? `<div class="rv-sum">근거 확인 ${it.ok}문장 · 확인 필요(?) ${it.need}문장 · ${esc(it.ran_at)} · ${eng(it)}</div>
         <div class="paper intro-prev">${it.html}</div>
         <div class="row" style="margin-top:8px"><button class="primary" id="mxIns">④ 집필 원고 맨 앞에 넣기</button><button id="mxInsEnd">맨 뒤에 넣기</button></div>` : ""}</div>
+    <div class="card"><h3>⚖ 근거 저울</h3>
+      <p class="small muted" style="margin:2px 0 8px">"진지한 여가는 삶의 질을 높이는가?"처럼 질문하면 표의 논문들이 각각 예·일부·아니오 중 무엇으로 답하는지 원문 근거와 함께 보여줘요. 결과가 엇갈리는 지점이 논의·연구 공백의 재료가 돼요.</p>
+      <div class="row"><input id="mtQ" class="grow" placeholder="예) 진지한 여가 수준이 높을수록 삶의 질이 높은가?"><button class="primary" id="mtGo" ${d.rows.length && !mj ? "" : "disabled"}>물어보기</button></div>
+      ${logBox("meter")}${meterHtml(rep.meter, num)}</div>
+    <div class="card"><div class="row"><h3 class="grow">🕸 연구 지도</h3><button class="primary" id="mapGo" ${d.rows.length >= 2 && !mj ? "" : "disabled"}>관련 논문 찾기</button></div>
+      <p class="small muted" style="margin:2px 0 8px">표의 논문들이 <b>공통으로 인용한 핵심 문헌</b>(꼭 읽어야 할 고전)과, 표의 논문들을 <b>인용한 최근 연구</b>(최근 6년)를 인용 관계로 찾아요. 여러 편과 연결될수록 내 주제와 가까워요. (국내 학술지는 인용 정보가 빠진 경우가 많아요)</p>
+      ${logBox("map")}${mapHtml(rep.map)}</div>
+    <div class="card"><div class="row"><h3 class="grow">🗺 연구모형 그림</h3><button id="mdAi" ${!mj ? "" : "disabled"}>AI로 변인 채우기</button></div>
+      <p class="small muted" style="margin:2px 0 8px">변인 이름을 적으면 연구모형 그림을 바로 그려요. 쉼표(,)로 여러 개를 적을 수 있어요. 그림 파일(PNG·SVG)로 내려받아 한글·워드·PPT에 넣으세요.</p>
+      ${logBox("model")}
+      <div class="md-form">
+        <label>독립변인<input data-md="iv" value="${esc((rep.model?.iv || []).join(", "))}"></label>
+        <label>매개변인<input data-md="mediators" value="${esc((rep.model?.mediators || []).join(", "))}"></label>
+        <label>종속변인<input data-md="dvs" value="${esc((rep.model?.dvs || []).join(", "))}"></label>
+        <label>조절변인<input data-md="moderators" value="${esc((rep.model?.moderators || []).join(", "))}"></label>
+        <label>통제변인<input data-md="covariates" value="${esc((rep.model?.covariates || []).join(", "))}"></label>
+        <label>매개 방식<select data-md="mediation">${["병렬", "직렬", "단순", "없음"].map((x) => `<option ${(rep.model?.mediation || "병렬") === x ? "selected" : ""}>${x}</option>`).join("")}</select></label>
+        <label>그림 제목<input data-md="title" value="${esc(rep.model?.title || "연구모형")}"></label>
+      </div>
+      <div id="mdSvg" class="md-svg"></div>
+      <div class="row"><button id="mdPng">⬇ PNG 그림</button><button id="mdSvgDl">⬇ SVG 그림</button><span class="small muted" id="mdSaved"></span></div></div>
   </div>`;
 
   const go = (kind, url, json, title) => async () => {
@@ -481,6 +502,54 @@ async function renderMatrix() {
     if (tr) { tr.scrollIntoView({ block: "center", behavior: "smooth" }); tr.classList.add("flash"); setTimeout(() => tr.classList.remove("flash"), 1600); }
   }));
   $$(".intro-prev .cite[data-chunk]", body).forEach((c) => (c.onclick = () => showEvidence(c)));
+  $("#mtGo").onclick = () => {
+    const q = $("#mtQ").value.trim();
+    if (q.length < 5) return toast("질문을 적어주세요");
+    go("meter", `/api/projects/${p.id}/meter`, { question: q }, "근거 저울")();
+  };
+  $("#mapGo").onclick = go("map", `/api/projects/${p.id}/map`, null, "연구 지도");
+  $("#mdAi").onclick = go("model", `/api/projects/${p.id}/model_suggest`, null, "연구모형 변인 정리");
+  $$(".mt-ev, .mx-ev2", body).forEach((x) => (x.onclick = (ev) => { ev.stopPropagation(); showEvidence({ chunk: x.dataset.chunk, quote: x.dataset.quote }); }));
+  $$("[data-mapget]", body).forEach((b) => (b.onclick = async () => {
+    const [list, i] = b.dataset.mapget.split("-");
+    const w = rep.map[list][+i];
+    b.disabled = true;
+    const { job } = await api("/api/fetch_work", { json: w });
+    runJob(job, "논문 내려받는 중", { onDone: (r) => { b.textContent = r?.paper ? "내 자료에 추가됨 ✓" : "받지 못했어요"; } });
+  }));
+  const readModel = () => {
+    const m = {};
+    $$("[data-md]", body).forEach((x) => {
+      const k = x.dataset.md;
+      m[k] = ["mediation", "title"].includes(k) ? x.value.trim() : x.value.split(/[,，、]/).map((t) => t.trim()).filter(Boolean);
+    });
+    return m;
+  };
+  let mdT = null;
+  const redraw = () => { $("#mdSvg").innerHTML = modelSvg(readModel()); };
+  redraw();
+  $$("[data-md]", body).forEach((x) => (x.oninput = x.onchange = () => {
+    redraw();
+    clearTimeout(mdT);
+    mdT = setTimeout(async () => { await api(`/api/projects/${p.id}/model`, { method: "PUT", json: readModel() }); const sv = $("#mdSaved"); if (sv) sv.textContent = "저장됨 ✓"; }, 900);
+  }));
+  const svgText = () => $("#mdSvg svg").outerHTML;
+  const dl = (blob, name) => { const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 2000); };
+  $("#mdSvgDl").onclick = () => dl(new Blob([svgText()], { type: "image/svg+xml" }), "연구모형.svg");
+  $("#mdPng").onclick = () => {
+    const svg = $("#mdSvg svg");
+    const w = +svg.getAttribute("width"), h = +svg.getAttribute("height");
+    const img = new Image();
+    img.onload = () => {
+      const c = document.createElement("canvas");
+      c.width = w * 3; c.height = h * 3;
+      const g = c.getContext("2d");
+      g.fillStyle = "#fff"; g.fillRect(0, 0, c.width, c.height);
+      g.drawImage(img, 0, 0, c.width, c.height);
+      c.toBlob((b) => dl(b, "연구모형.png"), "image/png");
+    };
+    img.src = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(svgText());
+  };
   const insert = (front) => async () => {
     const cur = await api(`/api/projects/${p.id}`);
     const content = front ? it.html + (cur.content || "") : (cur.content || "") + it.html;
@@ -489,6 +558,106 @@ async function renderMatrix() {
     toast("서론 초안을 원고에 넣었어요 — ④ 집필에서 다듬어 주세요");
   };
   if (it) { $("#mxIns").onclick = insert(true); $("#mxInsEnd").onclick = insert(false); }
+}
+
+function meterHtml(hist, num) {
+  if (!hist || !hist.length) return "";
+  const col = { 예: "ok", 일부: "warn", 아니오: "need", 관련없음: "" };
+  const one = (h) => {
+    const rel = h.items.filter((x) => x.verdict !== "관련없음");
+    const tot = rel.length || 1;
+    const bar = ["예", "일부", "아니오"].map((k) => h.counts[k] ? `<span class="mt-seg mt-${col[k]}" style="width:${(h.counts[k] / tot) * 100}%">${k} ${h.counts[k]}</span>` : "").join("");
+    return `<div class="mt-q"><b>Q.</b> ${esc(h.question)} <span class="small muted">· ${esc(h.ran_at)}</span></div>
+      <div class="mt-bar">${bar || `<span class="small muted">이 질문을 다룬 논문이 없어요</span>`}</div>
+      <div class="small" style="margin:4px 0 6px">${esc(h.summary)}</div>
+      ${h.items.filter((x) => x.verdict !== "관련없음").map((x) => `<div class="rv-item ${col[x.verdict]}"><span class="badge rq-${col[x.verdict]}">${x.verdict}</span> <b>${num[x.paper_id] ? `[${num[x.paper_id]}] ` : ""}${esc(x.cite)}</b> ${esc(x.reason)}
+        ${x.chunk ? `<span class="mt-ev small" data-chunk="${x.chunk}" data-quote="${esc(x.quote)}">원문 ↗</span>` : ""}</div>`).join("")}
+      ${h.counts["관련없음"] ? `<div class="small muted">관련없음 ${h.counts["관련없음"]}편: ${esc(h.items.filter((x) => x.verdict === "관련없음").map((x) => x.cite).join(", "))}</div>` : ""}`;
+  };
+  return one(hist[0]) + (hist.length > 1 ? `<details class="small" style="margin-top:8px"><summary>이전 질문 ${hist.length - 1}개</summary>${hist.slice(1).map((h) => `<div style="margin-top:8px">${one(h)}</div>`).join("")}</details>` : "");
+}
+
+function mapHtml(m) {
+  if (!m) return "";
+  const row = (list) => (w, i) => `<div class="rv-item"><b>${w.doi ? `<a href="https://doi.org/${esc(w.doi)}" target="_blank">${esc(w.title)}</a>` : esc(w.title)}</b>
+    <div class="small muted">${esc((w.authors || []).slice(0, 3).join(", "))} · ${esc(w.year)} · 피인용 ${w.cited} · <b>표의 논문 ${w.count}편과 연결</b></div>
+    <div class="row" style="margin-top:4px">${w.have ? `<span class="badge gray">내 자료에 있음</span>` : `<button class="small" data-mapget="${list}-${i}">${w.is_oa ? "내 자료로 내려받기" : "내려받기 시도(도서관 경유)"}</button>`}</div></div>`;
+  return `<div class="rv-sum">인용 정보를 찾은 논문 ${m.seeds}/${m.total}편 기준 · ${esc(m.ran_at)}</div>
+    <div class="small muted" style="margin-top:8px">📜 공통으로 인용한 핵심 문헌 (${m.prior.length})</div>${m.prior.map(row("prior")).join("") || `<div class="small muted">없음</div>`}
+    <div class="small muted" style="margin-top:8px">🌱 표의 논문들을 인용한 최근 연구 (${m.later.length})</div>${m.later.map(row("later")).join("") || `<div class="small muted">없음</div>`}`;
+}
+
+// 연구모형 그림 (SVG) — 병렬·직렬·단순 매개, 조절, 다중 종속
+function modelSvg(m) {
+  const X = (t) => String(t).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+  const iv = m.iv?.length ? m.iv : ["독립변인"], dv = m.dvs?.length ? m.dvs : ["종속변인"];
+  const med = m.mediation === "없음" ? [] : m.mediators || [];
+  const serial = m.mediation === "직렬" && med.length > 1;
+  const BW = 150, BH = 46, GAP = 30;
+  const boxes = [], lines = [];
+  const colH = (n) => n * BH + (n - 1) * GAP;
+  let W, H, top = m.moderators?.length ? 110 : 50;
+  const stackY = (n, cy) => Array.from({ length: n }, (_, i) => cy - colH(n) / 2 + i * (BH + GAP));
+  const pos = {};
+  if (serial) {
+    W = 60 + (med.length + 2) * (BW + 50);
+    const yTop = top, yBot = top + 140;
+    med.forEach((t, i) => (pos["m" + i] = [60 + (i + 1) * (BW + 50), yTop, t]));
+    const ivY = stackY(iv.length, yBot + BH / 2), dvY = stackY(dv.length, yBot + BH / 2);
+    iv.forEach((t, i) => (pos["i" + i] = [30, ivY[i], t]));
+    dv.forEach((t, i) => (pos["d" + i] = [60 + (med.length + 1) * (BW + 50), dvY[i], t]));
+    H = Math.max(...ivY, ...dvY) + BH + 60;
+    iv.forEach((_, i) => lines.push(["i" + i, "m0", false]));
+    med.forEach((_, i) => i && lines.push(["m" + (i - 1), "m" + i, false]));
+    dv.forEach((_, j) => lines.push(["m" + (med.length - 1), "d" + j, false]));
+  } else {
+    W = med.length ? 3 * BW + 2 * 140 + 60 : 2 * BW + 200 + 60;
+    const n = Math.max(iv.length, med.length + (med.length % 2 ? 1 : 0), dv.length, 1);
+    const cy = top + colH(Math.max(n, 2)) / 2 + 10;
+    const xs = med.length ? [30, 30 + BW + 140, 30 + 2 * (BW + 140)] : [30, null, 30 + BW + 200];
+    stackY(iv.length, cy).forEach((y, i) => (pos["i" + i] = [xs[0], y, iv[i]]));
+    stackY(dv.length, cy).forEach((y, i) => (pos["d" + i] = [xs[2], y, dv[i]]));
+    // 매개변인은 가운데 줄(직접경로)을 비워 위아래로
+    const half = Math.ceil(med.length / 2);
+    med.forEach((t, i) => {
+      const up = i < half, k = up ? half - 1 - i : i - half;
+      const y = up ? cy - BH / 2 - 50 - k * (BH + GAP) - BH : cy + BH / 2 + 50 + k * (BH + GAP);
+      pos["m" + i] = [xs[1], y, t];
+    });
+    H = Math.max(...Object.values(pos).map((p) => p[1])) + BH + 60;
+    iv.forEach((_, i) => med.forEach((__, k) => lines.push(["i" + i, "m" + k, false])));
+    med.forEach((_, k) => dv.forEach((__, j) => lines.push(["m" + k, "d" + j, false])));
+  }
+  iv.forEach((_, i) => dv.forEach((__, j) => lines.push(["i" + i, "d" + j, med.length > 0])));
+  const c = (k) => { const [x, y] = pos[k]; return [x + BW / 2, y + BH / 2]; };
+  const edge = (from, to) => {  // 상자 테두리에서 시작·끝
+    const [x1, y1] = c(from), [x2, y2] = c(to);
+    const cut = (x, y, dx, dy) => { const t = Math.min(Math.abs((BW / 2) / (dx || 1e-6)), Math.abs((BH / 2) / (dy || 1e-6))); return [x + dx * t, y + dy * t]; };
+    const [ax, ay] = cut(x1, y1, x2 - x1, y2 - y1), [bx, by] = cut(x2, y2, x1 - x2, y1 - y2);
+    return [ax, ay, bx, by];
+  };
+  let svgLines = lines.map(([a, b, dash]) => { const [x1, y1, x2, y2] = edge(a, b); return `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="#333" stroke-width="1.6" ${dash ? 'stroke-dasharray="6 4"' : ""} marker-end="url(#ah)"/>`; }).join("");
+  if (m.moderators?.length) {
+    const tgt = med.length ? edge("i0", serial ? "m0" : "m0") : edge("i0", "d0");
+    const mx = (tgt[0] + tgt[2]) / 2, my = (tgt[1] + tgt[3]) / 2;
+    m.moderators.forEach((t, i) => {
+      const bx = mx - BW / 2 + i * (BW + 20), by = 20;
+      boxes.push(`<rect x="${bx}" y="${by}" width="${BW}" height="${BH}" rx="6" fill="#fff" stroke="#333" stroke-width="1.4"/><text x="${bx + BW / 2}" y="${by + BH / 2 + 5}" text-anchor="middle" font-size="14">${X(t)}</text>`);
+      svgLines += `<line x1="${bx + BW / 2}" y1="${by + BH}" x2="${mx}" y2="${my - 3}" stroke="#333" stroke-width="1.6" marker-end="url(#ah)"/>`;
+    });
+  }
+  Object.values(pos).forEach(([x, y, t]) => {
+    const fs = String(t).length > 10 ? 12 : 14;
+    boxes.push(`<rect x="${x}" y="${y}" width="${BW}" height="${BH}" rx="6" fill="#fff" stroke="#333" stroke-width="1.4"/><text x="${x + BW / 2}" y="${y + BH / 2 + fs / 3}" text-anchor="middle" font-size="${fs}">${X(t)}</text>`);
+  });
+  const W2 = Math.max(W, ...Object.values(pos).map((p) => p[0] + BW + 30));
+  const foot = [m.covariates?.length ? `통제변인: ${m.covariates.join(", ")}` : "", med.length ? "점선: 직접효과" : ""].filter(Boolean).join("    ");
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${W2}" height="${H + 20}" viewBox="0 0 ${W2} ${H + 20}" font-family="'Malgun Gothic','맑은 고딕',sans-serif">
+    <defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#333"/></marker></defs>
+    <rect width="100%" height="100%" fill="#fff"/>
+    <text x="16" y="${m.moderators?.length ? H + 8 : 26}" font-size="14" font-weight="700">${X(m.title || "연구모형")}</text>
+    ${svgLines}${boxes.join("")}
+    <text x="${W2 - 16}" y="${H + 8}" text-anchor="end" font-size="11" fill="#555">${X(foot)}</text></svg>`;
 }
 
 function bindAddButtons(after) {
@@ -1202,10 +1371,27 @@ function renderEvidence(box, e, extraHtml = "") {
     : `<span class="match part">문단 단위로 표시</span>`;
   box.innerHTML = `${extraHtml}${matchTxt}
     <div class="quote" id="evQuote">${markedText(e)}</div>
+    <div class="row" style="margin:6px 0"><button class="small" id="evExplain">🇰🇷 쉽게 설명·번역</button></div><div id="evExpl"></div>
     <div class="pagenav"><button data-d="-1">◀</button><span id="pgLbl"></span><button data-d="1">▶</button>
       <button class="small" id="backPg">인용 쪽으로</button><span class="grow"></span>
       <a href="/api/pdf/${e.paper_id}#page=${e.page + 1}" target="_blank">원본 PDF 열기 ↗</a></div>
     <div class="pageview" id="pv"></div>`;
+  $("#evExplain", box).onclick = async () => {
+    const b = $("#evExplain", box), out = $("#evExpl", box);
+    b.disabled = true;
+    out.innerHTML = `<div class="small muted"><span class="spin"></span> 풀어 쓰는 중…</div>`;
+    const quote = e.quote_range ? e.text.slice(e.quote_range[0], e.quote_range[1]) : "";
+    const { job } = await api("/api/explain", { json: { chunk: e.id, quote, project_id: S.cur?.id || null } });
+    runJob(job, "쉽게 설명", {
+      onDone: (r, j) => {
+        b.disabled = false;
+        if (j.status !== "done" || !r) { out.innerHTML = `<div class="small" style="color:var(--warn)">${esc((j.log || []).slice(-1)[0] || "실패했어요")}</div>`; return; }
+        out.innerHTML = `<div class="explain">${r.translation ? `<div><b>번역</b> ${esc(r.translation)}</div>` : ""}
+          <div><b>쉽게 말하면</b> ${esc(r.plain)}</div>
+          ${(r.terms || []).length ? `<div class="small">${r.terms.map((t) => `<b>${esc(t.term)}</b>: ${esc(t.meaning)}`).join(" · ")}</div>` : ""}</div>`;
+      },
+    });
+  };
   const draw = () => {
     $("#pgLbl", box).textContent = `${page + 1} / ${e.pages}쪽`;
     const rects = page === e.page ? e.hl.map((h) => {

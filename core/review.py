@@ -811,6 +811,9 @@ FEATURES = {
     "matrix": ("문헌분석표 만들기", "lit"),
     "gaps": ("연구 동향·공백 분석", "lit"),
     "intro": ("서론 초안 작성", "draft"),
+    "meter": ("근거 저울(연구 결과 비교)", "lit"),
+    "explain": ("원문 쉽게 설명·번역", "lit"),
+    "model": ("연구모형 변인 정리", "struct"),
 }
 PURPOSE = {
     "lit": ("선행연구 탐색과 정리", "literature search and organization"),
