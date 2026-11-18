@@ -57,10 +57,16 @@ function toast(msg, ms = 2600) {
 }
 
 // ---------- 백그라운드 작업 표시 ----------
+function fmtEta(sec) {
+  if (sec < 60) return `${sec}초`;
+  const m = Math.round(sec / 60);
+  return m < 60 ? `${m}분` : `${Math.floor(m / 60)}시간 ${m % 60}분`;
+}
+
 function runJob(id, title, { onEmit, onDone, logEl, onLog } = {}) {
   const card = document.createElement("div");
   card.className = "job";
-  card.innerHTML = `<div class="h"><span class="spin"></span><span class="grow">${esc(title)}</span><button class="icon" title="중지">■</button></div><div class="l">시작…</div>`;
+  card.innerHTML = `<div class="h"><span class="spin"></span><span class="grow">${esc(title)}</span><button class="icon" title="중지">■</button></div><div class="pg" hidden><div class="pg-bar"><span></span></div><div class="pg-t small"></div></div><div class="l">시작…</div>`;
   $("#jobs").appendChild(card);
   $("button", card).onclick = () => api(`/api/jobs/${id}/stop`, { method: "POST" });
   let emitted = 0;
@@ -70,8 +76,20 @@ function runJob(id, title, { onEmit, onDone, logEl, onLog } = {}) {
       try { j = await api(`/api/jobs/${id}`); } catch { setTimeout(tick, 2000); return; }
       const last = j.log[j.log.length - 1] || "";
       $(".l", card).textContent = last;
+      const pg = j.progress;
+      const pgText = pg ? `${pg.pct}% · ${pg.n}/${pg.total}${pg.eta ? ` · 약 ${fmtEta(pg.eta)} 남음` : ""}` : "";
+      if (pg) { $(".pg", card).hidden = false; $(".pg-bar span", card).style.width = pg.pct + "%"; $(".pg-t", card).textContent = pgText; }
       const le = logEl && document.getElementById(logEl);
-      if (le) { le.textContent = j.log.join("\n"); le.scrollTop = le.scrollHeight; }
+      if (le) {
+        le.textContent = j.log.join("\n");
+        le.scrollTop = le.scrollHeight;
+        if (pg) {  // 점검 카드 안에도 진행 막대
+          let bar = le.previousElementSibling;
+          if (!bar || !bar.classList.contains("pg")) { bar = document.createElement("div"); bar.className = "pg inline"; bar.innerHTML = `<div class="pg-bar"><span></span></div><div class="pg-t small"></div>`; le.before(bar); }
+          $(".pg-bar span", bar).style.width = pg.pct + "%";
+          $(".pg-t", bar).textContent = pgText;
+        }
+      }
       onLog && onLog(last, j);
       while (onEmit && emitted < j.emitted.length) onEmit(j.emitted[emitted++]);
       if (j.status === "running") { setTimeout(tick, 1000); return; }

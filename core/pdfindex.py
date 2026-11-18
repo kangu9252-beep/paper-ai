@@ -230,7 +230,7 @@ def guess_meta(path, chunks):
     return {"title": Path(path).stem, "authors": [], "year": "", "doi": ""}
 
 
-def index_pdf(path, meta=None, source="local", log=print):
+def index_pdf(path, meta=None, source="local", log=print, embed=True):
     path = str(Path(path).resolve())
     mtime = os.path.getmtime(path)
     old = db.q("SELECT id, mtime, title, authors, year, doi, venue, status FROM papers WHERE path=?", (path,), one=True)
@@ -267,7 +267,7 @@ def index_pdf(path, meta=None, source="local", log=print):
     rows = []
     for i in range(0, len(chunks), 32):
         part = chunks[i : i + 32]
-        vec = llm.embed([c["text"] for c in part])
+        vec = llm.embed([c["text"] for c in part]) if embed else None  # 여러 편을 읽을 때는 나중에 한꺼번에
         for j, c in enumerate(part):
             emb = vec[j].tobytes() if vec is not None else None
             rows.append((pid, c["page"], c["text"], json.dumps(c["lines"]), c["pw"], c["ph"], emb))
@@ -310,12 +310,11 @@ def scan_folders(folders, log=print, stop=lambda: False):
     log(f"PDF {len(found)}개 발견, 새로 읽을 것 {len(todo)}개 (이름에 저자·연도가 있는 {n_quick}개 먼저)")
     for i, p in enumerate(todo):
         if i == n_quick and n_quick:
-            log("먼저 읽은 논문을 검색할 수 있게 정리하는 중…")
-            embed_missing(log=log)
+            pass  # 의미 검색 준비는 다 읽은 뒤 한꺼번에 (읽기를 먼저 끝내 바로 찾을 수 있게)
         if stop():
             break
         log(f"[{i + 1}/{len(todo)}] {Path(p).name}")
-        index_pdf(p, log=log)
+        index_pdf(p, log=log, embed=False)
     # 지워진 파일 정리 — 외장하드가 빠져 있을 때는 지우지 않음
     offline = [f.lower() for f in folders if not os.path.isdir(f)]
     for path in known:
@@ -328,13 +327,17 @@ def scan_folders(folders, log=print, stop=lambda: False):
     return len(todo)
 
 
-def embed_missing(log=print):
+def embed_missing(log=print, stop=lambda: False):
     rows = db.q("SELECT id, text FROM chunks WHERE emb IS NULL")
     if not rows:
         return
     llm.reset_embed_check()
-    log(f"검색용 벡터가 없는 조각 {len(rows)}개 처리")
+    log(f"의미 검색 준비: 조각 {len(rows)}개 (그동안에도 낱말 검색으로는 찾을 수 있어요)")
+    total = (len(rows) + 31) // 32
     for i in range(0, len(rows), 32):
+        if stop():
+            break
+        log(f"[{i // 32 + 1}/{total}] 의미 검색 준비 중")
         part = rows[i : i + 32]
         vec = llm.embed([r["text"] for r in part])
         if vec is None:

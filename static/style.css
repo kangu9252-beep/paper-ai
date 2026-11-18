@@ -357,3 +357,10 @@ dialog.fpick { width: 640px; max-width: calc(100vw - 32px); }
 .fp-item > .grow { display: none; }
 .fp-item button { flex: 0 0 auto; white-space: nowrap; }
 .fp-item .small { white-space: nowrap; }
+
+/* 진행률 */
+.pg { margin: 4px 0 2px; }
+.pg.inline { margin: 6px 0 4px; }
+.pg-bar { height: 6px; background: var(--surface-2); border-radius: 3px; overflow: hidden; }
+.pg-bar span { display: block; height: 100%; width: 0; background: var(--accent); border-radius: 3px; transition: width .4s; }
+.pg-t { color: var(--muted); margin-top: 2px; }

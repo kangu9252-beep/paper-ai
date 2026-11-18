@@ -1,5 +1,7 @@
 """논문 AI — 로컬 웹 서버. 실행: start.bat (브라우저에서 http://127.0.0.1:8765)"""
 import json
+import time
+import re
 import os
 import sys
 import shutil
@@ -28,6 +30,7 @@ class Job:
         JOBS[self.id] = self
 
         self.engine = engine
+        self.t0 = time.time()
 
         def run():
             llm.set_engine(engine)  # 이 작업에서 쓸 AI: local(내 컴퓨터) / claude(인터넷)
@@ -66,8 +69,27 @@ def project_folders(pid):
         return []
 
 
+STEP_RE = re.compile(r"^\s*\[[^\]\d]*?(\d+)\s*/\s*(\d+)\]")
+
+
+def progress(j):
+    """기록 속 마지막 '[3/10]' 같은 표시로 진행률과 남은 시간 어림값을 낸다."""
+    for line in reversed(j.log):
+        m = STEP_RE.match(line)
+        if m:
+            n, total = int(m.group(1)), int(m.group(2))
+            if total <= 0:
+                break
+            done = max(0, n - 1)  # n번째를 시작했다 = n-1개 끝남
+            pct = 100 if j.status == "done" else min(99, round(done / total * 100))
+            el = time.time() - j.t0
+            eta = round(el / done * (total - done)) if done >= 1 and j.status == "running" else None
+            return {"pct": pct, "n": n, "total": total, "eta": eta}
+    return None
+
+
 def job_out(j):
-    return {"id": j.id, "kind": j.kind, "status": j.status, "log": j.log[-200:], "result": j.result, "emitted": j.emitted}
+    return {"id": j.id, "kind": j.kind, "status": j.status, "log": j.log[-200:], "result": j.result, "emitted": j.emitted, "progress": progress(j)}
 
 
 @app.get("/api/jobs/{jid}")
@@ -328,7 +350,8 @@ def scan(d: dict = Body(default={})):
 
     def fn(j):
         pdfindex.scan_folders(only or db.get_settings()["scan_folders"], log=j.say, stop=j.stop)
-        pdfindex.embed_missing(log=j.say)
+        j.say("PDF 읽기 끝 — 이제 근거 찾기가 돼요. 이어서 의미 검색을 준비해요(오래 걸리면 중지해도 돼요)")
+        pdfindex.embed_missing(log=j.say, stop=j.stop)
         j.say("완료")
 
     return {"job": Job("scan", fn, llm.engine_for(None)).id}  # 저자·연도 읽기는 설정한 AI로 (Claude면 빠름)
