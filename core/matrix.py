@@ -135,8 +135,13 @@ def build_row(paper_id, log):
     return {"paper_id": paper_id, "cite": p["cite"], "title": p["title"], "year": p["year"], "fields": fields, "ran_at": now(), "engine": llm.engine()}
 
 
-def build(pid, paper_ids, log, stop=lambda: False):
+def build(pid, paper_ids, log, stop=lambda: False, force=False):
     _, m = load(pid)
+    if not force:
+        skip = [pp for pp in paper_ids if str(pp) in m]
+        if skip:
+            log(f"이미 정리한 {len(skip)}편은 건너뛰어요 (0원)")
+        paper_ids = [pp for pp in paper_ids if str(pp) not in m]
     for n, pp in enumerate(paper_ids):
         if stop():
             break
@@ -206,13 +211,21 @@ GAP_SCHEMA = {
 }
 
 
-def gaps(pid, log, stop=lambda: False):
+def rows_sig(rs):
+    return ",".join(f"{r['paper_id']}:{r.get('ran_at', '')}" for r in rs)
+
+
+def gaps(pid, log, stop=lambda: False, force=False):
     p, _ = load(pid)
     rs = rows(pid)
+    prev = json.loads(p.get("reports") or "{}").get("gaps")
+    if not force and prev and prev.get("sig") == rows_sig(rs):
+        log("문헌분석표가 지난번과 같아서 지난 결과를 그대로 보여드려요 (0원) — 새로 하려면 '새로 실행'")
+        return
     if len(rs) < 3:
         raise RuntimeError("문헌분석표에 논문이 3편 이상 있어야 연구 공백을 볼 수 있어요.")
     log(f"문헌 {len(rs)}편으로 연구 동향과 공백을 분석하는 중…")
-    r = llm.chat(
+    r = llm.deep(
         f"내 연구 주제: {p.get('topic') or p.get('title')}\n\n[문헌분석표]\n{_table_text(rs)}\n\n"
         "이 표만 근거로 다음을 한국어로 쓰세요. rows에는 근거가 된 표의 번호를 넣으세요.\n"
         "- trends: 선행연구의 흐름 3~5개 (대상·변인·방법·결과의 경향)\n"
@@ -241,6 +254,7 @@ def gaps(pid, log, stop=lambda: False):
         "questions": r.get("questions", []),
         "ran_at": now(),
         "engine": llm.engine(),
+        "sig": rows_sig(rs),
     }
     _save_report(pid, "gaps", data)
     log(f"연구 동향 {len(data['trends'])}개 · 공백 {len(data['gaps'])}개 · 이론적 가정 {len(data['assumptions'])}개")
@@ -293,11 +307,14 @@ def _best_quote(sent, row):
     return out
 
 
-def intro(pid, log, stop=lambda: False):
+def intro(pid, log, stop=lambda: False, force=False):
     p, _ = load(pid)
     rs = rows(pid)
     rep = json.loads(p.get("reports") or "{}")
     g = rep.get("gaps")
+    if not force and rep.get("intro") and g and rep["intro"].get("sig") == g.get("ran_at"):
+        log("연구 공백이 지난번과 같아서 지난 서론 초안을 그대로 보여드려요 (0원) — 새로 하려면 '새로 실행'")
+        return
     if not g:
         raise RuntimeError("먼저 '연구 공백 찾기'를 실행해 주세요.")
     if llm.embed(["확인"]) is None:
@@ -306,7 +323,7 @@ def intro(pid, log, stop=lambda: False):
     gap_txt = "\n".join(f"- {x['gap']} (근거: {x['evidence']}; 관련 [{', '.join(str(num[i]) for i in x['rows'] if i in num)}])" for x in g["gaps"])
     q_txt = "\n".join(f"- {q}" for q in g["questions"])
     log("서론 초안을 쓰는 중…")
-    text = llm.chat(
+    text = llm.deep(
         f"내 연구 주제: {p.get('topic') or p.get('title')}\n\n[문헌분석표]\n{_table_text(rs, 300)}\n\n[연구 공백]\n{gap_txt}\n\n[연구문제 후보]\n{q_txt}\n\n"
         "위 자료만 써서 학위논문 서론 초안을 한국어 학술 문체(~이다, ~하였다)로 쓰세요. 흐름: "
         "① 연구의 필요성(현상과 중요성) → ② 선행연구의 흐름 → ③ 연구 공백 → ④ 연구 목적과 연구문제. 문단 4~5개, 전체 14~20문장.\n"
@@ -360,5 +377,5 @@ def intro(pid, log, stop=lambda: False):
             paras_out.append(f'<p class="ai-draft" data-ai="{plain}">{" ".join(parts)}</p>')
     memo = f'<p class="ai-note" contenteditable="false">💬 AI 메모: {html.escape(note)} <small>(확인 후 지워주세요)</small></p>' if note else ""
     out = "<h2>서론 (AI 초안)</h2>" + "".join(paras_out) + memo
-    _save_report(pid, "intro", {"html": out, "ran_at": now(), "engine": llm.engine(), "ok": total_ok, "need": total_bad})
+    _save_report(pid, "intro", {"html": out, "ran_at": now(), "engine": llm.engine(), "ok": total_ok, "need": total_bad, "sig": g.get("ran_at")})
     log(f"서론 초안 완성 — 근거 확인 {total_ok}문장, 확인 필요(?) {total_bad}문장")

@@ -57,6 +57,21 @@ function toast(msg, ms = 2600) {
 }
 
 // ---------- 백그라운드 작업 표시 ----------
+// 실행 전 예상 금액 (Claude일 때만, 로컬 AI면 무료)
+S.est = {};
+async function loadEst(pid) {
+  try { S.est[pid] = await api(`/api/projects/${pid}/estimates`); } catch { S.est[pid] = null; }
+  return S.est[pid];
+}
+function costTag(pid, key, mult = 1) {
+  const e = S.est[pid];
+  if (!e) return "";
+  if (e.engine !== "claude") return `<span class="cost free" title="내 컴퓨터 로컬 AI로 해요">무료</span>`;
+  const w = Math.round((e.won[key] || 0) * mult);
+  if (!w) return `<span class="cost free">0원</span>`;
+  return `<span class="cost" title="Claude 사용 예상 금액(어림값). 원고가 그대로면 다시 돌리지 않아 0원이에요.">약 ${w.toLocaleString()}원</span>`;
+}
+
 function fmtEta(sec) {
   if (sec < 60) return `${sec}초`;
   const m = Math.round(sec / 60);
@@ -64,8 +79,13 @@ function fmtEta(sec) {
 }
 
 function runJob(id, title, { onEmit, onDone, logEl, onLog } = {}) {
+  if (document.querySelector(`.job[data-id="${id}"]`)) {  // 이미 화면에 있는 작업 (예: 읽는 중에 폴더를 더 고름)
+    toast("이미 진행 중인 작업이에요 — 끝나면 이어서 처리해요");
+    return Promise.resolve(null);
+  }
   const card = document.createElement("div");
   card.className = "job";
+  card.dataset.id = id;
   card.innerHTML = `<div class="h"><span class="spin"></span><span class="grow">${esc(title)}</span><button class="icon" title="중지">■</button></div><div class="pg" hidden><div class="pg-bar"><span></span></div><div class="pg-t small"></div></div><div class="l">시작…</div>`;
   $("#jobs").appendChild(card);
   $("button", card).onclick = () => api(`/api/jobs/${id}/stop`, { method: "POST" });
@@ -73,7 +93,19 @@ function runJob(id, title, { onEmit, onDone, logEl, onLog } = {}) {
   return new Promise((resolve) => {
     const tick = async () => {
       let j;
-      try { j = await api(`/api/jobs/${id}`); } catch { setTimeout(tick, 2000); return; }
+      try { j = await api(`/api/jobs/${id}`); } catch (e) {
+        if (/작업 없음/.test(e.message)) {  // 앱이 다시 켜지면서 끊긴 작업
+          $(".spin", card)?.remove();
+          $(".l", card).textContent = "앱이 다시 켜지면서 멈췄어요. 필요하면 다시 실행해 주세요.";
+          $(".h", card).insertAdjacentHTML("afterbegin", "⏹");
+          setTimeout(() => card.remove(), 6000);
+          onDone && onDone(null, { status: "stopped", log: ["앱이 다시 켜지면서 멈췄어요"] });
+          resolve(null);
+          return;
+        }
+        setTimeout(tick, 2000);
+        return;
+      }
       const last = j.log[j.log.length - 1] || "";
       $(".l", card).textContent = last;
       const pg = j.progress;
@@ -576,6 +608,7 @@ async function renderMatrix() {
   let d;
   try { d = await api(`/api/projects/${p.id}/matrix`); } catch (e) { body.innerHTML = `<div class="pad"><div class="card">${esc(e.message)}</div></div>`; return; }
   if (S.cur?.id !== p.id || S.tab !== "matrix") return;
+  await loadEst(p.id);
   const rep = p.reports || {};
   const mj = matrixJob[p.id];
   const num = Object.fromEntries(d.rows.map((r, i) => [r.paper_id, i + 1]));
@@ -614,17 +647,19 @@ async function renderMatrix() {
   body.innerHTML = `<div class="pad">
     <div class="card"><h3>📚 문헌분석표</h3>
       <p class="small muted">선행연구마다 목적·대상·변인·측정도구·분석 방법·결과·한계를 정리해요. 모든 칸에 원문 근거가 달려 있어요. (한 편에 Claude 20~30초, 로컬 AI 1~2분)</p>
-      <div class="row"><button class="primary" id="mxPick" ${mj ? "disabled" : ""}>＋ 논문 골라 정리하기</button>
-        ${sug.length ? `<button id="mxSug" ${mj ? "disabled" : ""}>원고에 인용된 논문 ${sug.length}편 한꺼번에 정리</button>` : ""}
+      <div class="row"><button class="primary" id="mxPick" ${mj ? "disabled" : ""}>＋ 논문 골라 정리하기</button>${costTag(p.id, "matrix_per_paper").replace("약 ", "한 편 약 ")}
+        ${sug.length ? `<button id="mxSug" ${mj ? "disabled" : ""}>원고에 인용된 논문 ${sug.length}편 한꺼번에 정리</button>${costTag(p.id, "matrix_per_paper", sug.length)}` : ""}
         <span class="grow"></span>${d.rows.length ? `<a class="btnlink ghostlink" href="/api/projects/${p.id}/matrix.csv">⬇ 엑셀로 내려받기 (CSV)</a><a class="btnlink ghostlink" href="/api/projects/${p.id}/refs.ris" title="Zotero·EndNote·Mendeley에서 '가져오기'로 여세요">⬇ Zotero·EndNote로 (RIS)</a>` : ""}</div>
       ${logBox("matrix")}
       <div id="mxPicker" class="mx-picker" style="display:none"></div>
       ${table}</div>
     <div class="card"><div class="row"><h3 class="grow">🔎 연구 동향 · 공백 검증</h3>
+        ${costTag(p.id, "gaps")}${g ? `<button class="small ghost" id="mxGapF" ${!mj ? "" : "disabled"}>새로 실행</button>` : ""}
         <button class="primary" id="mxGap" ${d.rows.length >= 3 && !mj ? "" : "disabled"}>연구 공백 찾기</button></div>
       <p class="small muted" style="margin:2px 0 8px">표에 정리한 논문만 근거로 선행연구의 흐름, 연구 공백(몇 편 중 몇 편인지 숫자로), 선행연구가 깔고 있는 이론적 가정과 그 비판, 연구문제 후보를 정리해요. (3편 이상 필요)</p>
       ${logBox("gaps")}${gapsHtml}</div>
     <div class="card"><div class="row"><h3 class="grow">✍ 서론 초안</h3>
+        ${costTag(p.id, "intro")}${it ? `<button class="small ghost" id="mxIntroF" ${!mj ? "" : "disabled"}>새로 실행</button>` : ""}
         <button class="primary" id="mxIntro" ${g && !mj ? "" : "disabled"}>서론 초안 쓰기</button></div>
       <p class="small muted" style="margin:2px 0 8px">연구의 필요성 → 선행연구의 흐름 → 연구 공백 → 연구 목적·연구문제 순서로 써요. 문장마다 표의 논문 원문에서 근거를 찾아 연결하고, 못 찾으면 '?'를 달아요. AI 초안이라 원고에서 보라색으로 표시돼요.</p>
       ${logBox("intro")}
@@ -695,6 +730,8 @@ async function renderMatrix() {
   };
   if ($("#mxSug")) $("#mxSug").onclick = go("matrix", `/api/projects/${p.id}/matrix`, { paper_ids: sug.map((c) => c.id) }, "문헌분석표 만들기");
   $("#mxGap").onclick = go("gaps", `/api/projects/${p.id}/gaps`, null, "연구 공백 찾기");
+  if ($("#mxGapF")) $("#mxGapF").onclick = go("gaps", `/api/projects/${p.id}/gaps?force=1`, null, "연구 공백 찾기");
+  if ($("#mxIntroF")) $("#mxIntroF").onclick = go("intro", `/api/projects/${p.id}/intro?force=1`, null, "서론 초안 쓰기");
   $("#mxIntro").onclick = go("intro", `/api/projects/${p.id}/intro`, null, "서론 초안 쓰기");
   $$(".mx-ev", body).forEach((td) => (td.onclick = () => showEvidence({ chunk: td.dataset.chunk, quote: td.dataset.quote })));
   $$("[data-del]", body).forEach((b) => (b.onclick = async () => { await api(`/api/projects/${p.id}/matrix/${b.dataset.del}`, { method: "DELETE" }); renderMatrix(); }));
@@ -1352,7 +1389,9 @@ async function autoFind(c) {
 async function autoAll() {
   const list = $$(".cite.need", editor);
   if (!list.length) return toast("출처 필요(?) 표시가 없어요 👍");
-  if (!confirm(`출처 필요 ${list.length}곳을 차례로 자동으로 찾을까요? (한 곳당 1~3분)`)) return;
+  const e = S.est[S.cur.id] || (await loadEst(S.cur.id));
+  const money = e && e.engine === "claude" ? ` Claude 사용 예상 약 ${(e.won.autoall || 0).toLocaleString()}원.` : " 내 컴퓨터 로컬 AI로 해요(무료).";
+  if (!confirm(`출처 필요 ${list.length}곳을 차례로 자동으로 찾을까요?${money}`)) return;
   for (const c of list) if (document.body.contains(c) && c.classList.contains("need")) await autoFind(c);
 }
 
@@ -1525,6 +1564,7 @@ function reportHtml(k, rep) {
 
 async function renderReview() {
   const p = S.cur;
+  if (!S.est[p.id]) loadEst(p.id).then(() => { if (S.cur?.id === p.id && S.tab === "review") renderReview(); });
   const body = $("#tabBody");
   const has = (p.content || "").replace(/<[^>]+>/g, "").trim().length > 30;
   let sched = { rows: [], next: "", task: "none" };
@@ -1534,7 +1574,9 @@ async function renderReview() {
   const card = ([k, t, d]) => `<div class="card" id="tool-${k}"><div class="row"><h3 class="grow">${t}</h3>
       ${k === "panel" ? `<select id="pnTarget" class="small">${["학위논문 예비심사", "학위논문 본심사", "KCI 학술지 투고", "SSCI 학술지 투고"].map((t) => `<option ${(p.reports?.panel?.data?.target || "학위논문 예비심사") === t ? "selected" : ""}>${t}</option>`).join("")}</select>` : ""}
       <button class="small" data-night="${k}" ${has ? "" : "disabled"}>🌙 새벽 예약</button>
-      <button class="small primary" data-run="${k}" ${has && !rj ? "" : "disabled"}>지금 실행</button></div>
+      ${costTag(p.id, k)}
+      ${p.reports?.[k] ? `<button class="small ghost" data-force="${k}" ${has && !rj ? "" : "disabled"} title="원고가 그대로여도 다시 돌려요">새로 실행</button>` : ""}
+      <button class="small primary" data-run="${k}" ${has && !rj ? "" : "disabled"}>${p.reports?.[k] ? "다시 실행" : "지금 실행"}</button></div>
       <p class="small muted" style="margin:2px 0 8px">${d}</p>
       ${k === "structure" && p.engine !== "claude" ? `<p class="small" style="color:var(--warn);margin:-4px 0 8px">로컬 AI는 논문 뼈대 정리까지는 쓸 만하지만, 심사 의견은 얕거나 빗나갈 수 있어요. 이 기능은 Claude로 돌리기를 권해요. (민감한 원고라 로컬만 써야 한다면 참고용으로만 보세요)</p>` : ""}
       ${rj && (rj.tool === k || rj.tool === "full") ? `<div class="log" id="rvlog-${k}">시작…</div>` : ""}
@@ -1596,6 +1638,7 @@ async function renderReview() {
   $("#fullNow").onclick = () => runReview("full");
   $("#fullNight").onclick = () => scheduleNight("review", { tool: "full" });
   $$("[data-run]", body).forEach((b) => (b.onclick = () => runReview(b.dataset.run)));
+  $$("[data-force]", body).forEach((b) => (b.onclick = () => runReview(b.dataset.force, true)));
   $$("[data-night]", body).forEach((b) => (b.onclick = () => scheduleNight("review", { tool: b.dataset.night })));
   $$("[data-unsched]", body).forEach((b) => (b.onclick = async () => { await api(`/api/schedule/${b.dataset.unsched}`, { method: "DELETE" }); renderReview(); }));
   // 결과에서 원고로 이동
@@ -1659,10 +1702,13 @@ async function loadAiUse(p) {
   }));
 }
 
-async function runReview(tool) {
+async function runReview(tool, force = false) {
   const p = S.cur;
   await saveNow();
-  const q = tool === "panel" && $("#pnTarget") ? `?target=${encodeURIComponent($("#pnTarget").value)}` : "";
+  const qs = [];
+  if (tool === "panel" && $("#pnTarget")) qs.push(`target=${encodeURIComponent($("#pnTarget").value)}`);
+  if (force) qs.push("force=1");
+  const q = qs.length ? "?" + qs.join("&") : "";
   const { job } = await api(`/api/projects/${p.id}/review/${tool}${q}`, { method: "POST" });
   reviewJob[p.id] = { job, tool };
   renderReview();
@@ -1954,6 +2000,8 @@ async function renderSettings() {
       <label class="field" style="margin-top:6px"><span>Claude API 키 (Anthropic 콘솔에서 발급 · 이 컴퓨터에 암호화 저장)</span><input id="claude_key" type="password" value="${esc(s.claude_key)}" placeholder="sk-ant-..."></label>
       <div class="row"><button class="primary" id="claudeWiz">🧭 Claude 연결 도우미 (처음이라면)</button><button id="claudeTest">저장하고 연결 테스트</button><span id="claudeMsg" class="small"></span></div>
       <p class="small" id="claudeUsage" style="margin-bottom:0"></p>
+      <label class="field" style="margin-top:8px"><span>이번 달 Claude 사용 한도 (원) — 넘으면 Claude 작업이 멈춰요. 0이면 한도 없음</span>
+        <input id="monthly_cap_won" type="number" min="0" step="1000" value="${s.monthly_cap_won || 0}" style="max-width:160px"></label>
       <p class="small muted">Claude를 골라도 근거 검색·문장 위치 찾기는 항상 내 컴퓨터에서 해요. 새벽 예약 작업과 '로컬 AI만 사용'을 켠 원고는 항상 로컬 AI로 처리돼요.</p>
     </div>
     <div class="card"><h3>🌙 새벽 자동 실행</h3>
@@ -1965,6 +2013,7 @@ async function renderSettings() {
     <div class="card"><h3>내 컴퓨터에서 PDF를 찾을 폴더</h3>
       <textarea id="scan_folders" rows="4">${esc(s.scan_folders.join("\n"))}</textarea>
       <div class="row" style="margin-top:6px"><button id="scanPick">📁 폴더 고르기</button></div>
+      <label class="chk small" style="margin-top:6px"><input type="checkbox" id="scan_with_claude" ${s.scan_with_claude ? "checked" : ""}> PDF의 저자·연도 읽기를 Claude(가장 싼 Haiku)로 빠르게 (한 편에 1원 안팎 · 끄면 무료인 로컬 AI로 천천히)</label>
       <p class="small muted">한 줄에 폴더 하나. '내 컴퓨터 PDF 찾아 읽기'와 근거 자동찾기가 이 폴더들을 봅니다.</p>
       <label class="field"><span>한 번에 내려받을 최대 논문 수</span><input id="max_downloads" type="number" min="1" max="60" value="${s.max_downloads}"></label>
     </div>
@@ -1983,6 +2032,8 @@ async function renderSettings() {
     model: $("#model").value, embed_model: $("#embed_model").value, strict_verify: $("#strict_verify").checked,
     scan_folders: $("#scan_folders").value.split("\n").map((x) => x.trim()).filter(Boolean),
     max_downloads: +$("#max_downloads").value || 15,
+    scan_with_claude: $("#scan_with_claude").checked,
+    monthly_cap_won: Math.max(0, +$("#monthly_cap_won").value || 0),
     lib_login_url: $("#lib_login_url").value.trim(), lib_proxy_prefix: $("#lib_proxy_prefix").value.trim(),
     lib_id: $("#lib_id").value.trim(), lib_pw: $("#lib_pw").value,
     engine: $('input[name="engine"]:checked').value, claude_key: $("#claude_key").value,

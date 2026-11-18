@@ -96,6 +96,8 @@ DEFAULTS = {
     "max_downloads": 15,
     "engine": "local",  # local | claude
     "claude_key": "",
+    "scan_with_claude": True,  # PDF 저자·연도 읽기를 Claude(가장 싼 Haiku)로 — 한 편 1원 미만
+    "monthly_cap_won": 0,  # 이번 달 Claude 사용 한도(원), 0이면 없음
 }
 
 

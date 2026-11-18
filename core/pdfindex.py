@@ -200,7 +200,7 @@ def guess_meta(path, chunks):
     head = " ".join(c["text"] for c in chunks if c["page"] == 0)[:2000]
     if len(head) > 100:
         try:
-            r = llm.chat(
+            r = llm.light(
                 "다음은 학술 논문 PDF 첫 쪽의 텍스트입니다. 논문 제목, 저자 이름 목록(원문 표기 그대로), 출판 연도를 뽑아주세요. "
                 "모르면 빈 값으로 두세요.\n\n" + head,
                 schema={

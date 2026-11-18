@@ -1,5 +1,6 @@
 """이미 쓴 원고 보강: ⓪예비심사 리뷰 ①불러오기 ②인용 전체 점검 ③근거 없는 문장 ④논의 보강 ⑤최신 연구 ⑥참고문헌 대조."""
 import datetime
+import hashlib
 import html
 import io
 import json
@@ -129,10 +130,47 @@ def save(pid, soup):
     db.x("UPDATE projects SET content=?, updated=datetime('now','localtime') WHERE id=?", (str(soup), pid))
 
 
-def save_report(pid, tool, data, summary, log):
+def text_hash(content):
+    """원고 글의 지문 (인용 표시·메모는 빼고 글자만) — 바뀌지 않았으면 점검을 다시 돌리지 않는다."""
+    soup = BeautifulSoup(content or "", "html.parser")
+    for c in soup.select("span.cite, p.ai-note"):
+        c.decompose()
+    t = re.sub(r"\s+", " ", soup.get_text(" ")).strip()
+    return hashlib.sha1(t.encode("utf-8")).hexdigest()[:16]
+
+
+def para_hash(t):
+    return hashlib.sha1(re.sub(r"\s+", " ", t).strip().encode("utf-8")).hexdigest()[:12]
+
+
+def unchanged(pid, tool):
+    """지난번 이 점검을 돌린 뒤 원고 글이 그대로인가."""
+    p = db.q("SELECT content, reports FROM projects WHERE id=?", (pid,), one=True)
+    rep = json.loads(p["reports"] or "{}")
+    prev = rep.get(tool)
+    if not prev or not prev.get("hash"):
+        return False
+    if tool == "panel" and (prev.get("data") or {}).get("target") != (rep.get("panel_target") or "학위논문 예비심사"):
+        return False
+    return prev["hash"] == text_hash(p["content"])
+
+
+def _cache_get(pid, key):
+    p = db.q("SELECT reports FROM projects WHERE id=?", (pid,), one=True)
+    return json.loads(p["reports"] or "{}").get(key) or {}
+
+
+def _cache_put(pid, key, cache):
     p = db.q("SELECT reports FROM projects WHERE id=?", (pid,), one=True)
     r = json.loads(p["reports"] or "{}")
-    r[tool] = {"ran_at": now(), "engine": llm.engine(), "summary": summary, "data": data}
+    r[key] = cache
+    db.x("UPDATE projects SET reports=? WHERE id=?", (json.dumps(r, ensure_ascii=False), pid))
+
+
+def save_report(pid, tool, data, summary, log):
+    p = db.q("SELECT reports, content FROM projects WHERE id=?", (pid,), one=True)
+    r = json.loads(p["reports"] or "{}")
+    r[tool] = {"ran_at": now(), "engine": llm.engine(), "summary": summary, "data": data, "hash": text_hash(p["content"])}
     db.x("UPDATE projects SET reports=? WHERE id=?", (json.dumps(r, ensure_ascii=False), pid))
     log(summary)
 
@@ -459,7 +497,7 @@ def recent_research(pid, log, stop=lambda: False):
     body = " ".join(x for _, x in blocks)[:4000]
     topic = p.get("topic") or p.get("title") or ""
     log("원고 주제로 검색어 만드는 중…")
-    r = llm.chat(
+    r = llm.light(
         f"논문 주제: {topic}\n원고 일부: {body[:2500]}\n\n이 원고와 관련된 최신 선행연구를 찾기 위한 영어 학술 검색어 2개(각 3~6단어)를 만드세요.",
         schema={"type": "object", "properties": {"queries": {"type": "array", "items": {"type": "string"}}}, "required": ["queries"]},
         num_predict=200,
@@ -714,7 +752,7 @@ def structure_review(pid, log, stop=lambda: False):
         conc = [f"{pp}: {t[:500]}" for title, ps in secs if title and CONC_HEAD.search(title) for pp, _, t in ps]
         extra = "[연구문제가 나오는 문단]\n" + "\n".join(rq) + "\n\n[결론·논의 일부]\n" + "\n".join(conc)[:2500]
         sk_text = sk_text[:9000]
-    r = llm.chat(
+    r = llm.deep(
         f"논문 주제: {topic}\n\n[논문 뼈대: 장별 중심 주장과 문단별 중심 내용]\n{sk_text}\n\n{extra}\n\n"
         "예비심사 위원으로서 다음을 작성하세요.\n"
         "- thread: 이 논문 전체를 관통하는 핵심 주장 한 문장 (원고에서 읽히는 그대로. 줄기가 흐리면 흐리다고 쓰기)\n"
@@ -788,6 +826,9 @@ def full_review(pid, log, stop=lambda: False):
     for name in ("structure", "refs", "cites", "uncited", "recent", "discuss"):
         if stop():
             break
+        if unchanged(pid, name):
+            log(f"=== {name}: 원고가 그대로라 지난 결과를 써요 (0원) ===")
+            continue
         log(f"=== {name} ===")
         try:
             TOOLS[name](pid, log, stop)
@@ -947,7 +988,7 @@ def panel_review(pid, log, stop=lambda: False):
         if stop():
             return
         log(f"[{i + 1}/3] {name}({role}) 심사 중…")
-        r = llm.chat(
+        r = llm.deep(
             f"심사 종류: {target}\n논문 주제: {topic}\n\n[원고 (문단마다 P번호)]\n{text}\n\n"
             f"당신은 {name}, {role}입니다. {focus} 다른 심사위원과 상의하지 말고 독립적으로 심사하세요.\n"
             "- summary: 이 원고에 대한 총평 2~3문장\n- strengths: 강점 1~3개\n"
@@ -969,7 +1010,7 @@ def panel_review(pid, log, stop=lambda: False):
         + "\n".join(f"- ({c['severity']}, {c['where']}) {c['issue']} → {c['request']}" for c in rv["concerns"] or [])
         for rv in reviews
     )
-    d = llm.chat(
+    d = llm.deep(
         f"심사 종류: {target}\n논문 주제: {topic}\n\n[세 심사위원의 독립 심사]\n{block}\n\n"
         "심사위원장으로서 세 심사위원의 토론을 정리하세요.\n"
         "- agreements: 세 사람이 공통으로 지적한 점\n"
@@ -1013,7 +1054,7 @@ def panel_respond(pid, responses, log, stop=lambda: False):
     text = _manuscript_text(pid, soup)
     log(f"재심사 중 (수정 요구 {len(todo)}개)…")
     block = "\n\n".join(f"[{it['id']}] 수정 요구: {it['issue']}\n    연구자 답변: {it['response'] or '(답변 없음)'}" for it in todo)
-    r = llm.chat(
+    r = llm.deep(
         f"심사 종류: {pn['target']}\n\n[지난 심사의 수정 요구와 연구자의 답변]\n{block}\n\n[수정된 원고]\n{text}\n\n"
         "심사위원회로서 재심사하세요. 각 항목마다 status(해결/부분 해결/미해결)와 comment(왜 그렇게 판단했는지, 남은 요구가 있으면 구체적으로). "
         "답변만 하고 원고에 반영하지 않았으면 부분 해결 이하로 보세요. 수정하지 않는 이유를 설득력 있게 설명했다면 해결로 볼 수 있습니다. "
@@ -1076,7 +1117,15 @@ def style_check(pid, log, stop=lambda: False):
     paras = [(k, el, t) for title, ps in secs if not (title and SKIP_HEAD.search(title) and REF_HEAD.search(title)) for k, el, t in ps]
     byid = {k: el for k, el, _ in paras}
     plan = bool(re.search(r"계획|프로포절|proposal", (p.get("title") or "") + (p.get("topic") or "")))
+    cache = _cache_get(pid, "style_cache")  # 문단 지문 → 지난 점검 결과
     found, step = [], 12
+    for k, _, t in paras:
+        for it in cache.get(para_hash(t), []):
+            found.append(it | {"id": k})
+    todo = [x for x in paras if para_hash(x[2]) not in cache]
+    if len(todo) < len(paras):
+        log(f"고친 문단 {len(todo)}개만 점검해요 (나머지 {len(paras) - len(todo)}개는 지난 결과 그대로)")
+    paras_all, paras = paras, todo
     for i in range(0, len(paras), step):
         if stop():
             return
@@ -1098,6 +1147,10 @@ def style_check(pid, log, stop=lambda: False):
             k = (x.get("id") or "").strip().upper()
             if k in byid and x.get("problem"):
                 found.append({"id": k, "excerpt": x.get("excerpt", ""), "category": x.get("category", ""), "problem": x["problem"], "fix": x.get("fix", "")})
+        for k, _, t in part:  # 점검한 문단은 문제가 없어도 기록 (다음에 건너뛰기)
+            cache[para_hash(t)] = [{kk: v for kk, v in f.items() if kk != "id"} for f in found if f["id"] == k]
+        _cache_put(pid, "style_cache", cache)
+    paras = paras_all
     for f in found:
         _add_note(byid[f["id"]], {"sev": "사소", "cat": "문장", "issue": f"[{f['category']}] “{f['excerpt']}” — {f['problem']}", "fix": f["fix"], "q": ""})
     save(pid, soup)
@@ -1175,7 +1228,15 @@ def ai_tone(pid, log, stop=lambda: False):
     paras = [(k, el, t) for _, ps in _para_blocks(soup) for k, el, t in ps]
     byid = {k: el for k, el, _ in paras}
     stats = _tone_stats(paras)
+    cache = _cache_get(pid, "aitone_cache")
     found, step = [], 10
+    for k, _, t in paras:
+        for it in cache.get(para_hash(t), []):
+            found.append(it | {"id": k})
+    todo = [x for x in paras if para_hash(x[2]) not in cache]
+    if len(todo) < len(paras):
+        log(f"고친 문단 {len(todo)}개만 점검해요 (나머지 {len(paras) - len(todo)}개는 지난 결과 그대로)")
+    paras_all, paras = paras, todo
     for i in range(0, len(paras), step):
         if stop():
             return
@@ -1199,6 +1260,10 @@ def ai_tone(pid, log, stop=lambda: False):
             if k in byid and sc >= 40 and x.get("sentence"):
                 found.append({"id": k, "sentence": x["sentence"], "score": sc, "label": "AI" if sc >= 70 else "의심",
                               "patterns": x.get("patterns", []), "reason": x.get("reason", ""), "rewrite": x.get("rewrite", "")})
+        for k, _, t in part:
+            cache[para_hash(t)] = [{kk: v for kk, v in f.items() if kk != "id"} for f in found if f["id"] == k]
+        _cache_put(pid, "aitone_cache", cache)
+    paras = paras_all
     for f in found:
         _add_note(byid[f["id"]], {"sev": "중요" if f["label"] == "AI" else "보통", "cat": "AI 문체",
                                   "issue": f"[AI {f['score']}%] “{f['sentence'][:80]}” — {f['reason']}", "fix": f["rewrite"], "q": ""})
@@ -1213,3 +1278,39 @@ def ai_tone(pid, log, stop=lambda: False):
 
 
 TOOLS["aitone"] = ai_tone
+
+
+
+# ---------- 실행 전 예상 금액 ----------
+def estimates(pid):
+    p = db.q("SELECT content, matrix FROM projects WHERE id=?", (pid,), one=True)
+    soup = BeautifulSoup(p["content"] or "", "html.parser")
+    n_cites = len(soup.select("span.cite"))
+    n_need = len(soup.select("span.cite:not([data-chunk])"))
+    for c in soup.select("span.cite"):
+        c.decompose()
+    chars = len(soup.get_text())
+    T = int(chars * 0.8)  # 한국어 글자 수 → 토큰 수 어림
+    paras = max(1, len([x for x in soup.find_all(["p", "li"]) if len(x.get_text(strip=True)) >= 25]))
+    rows = len(json.loads(p.get("matrix") or "{}"))
+    E = llm.estimate_won
+    est = {
+        "structure": E("standard", int(T * 1.1), int(paras * 40)) + E("deep", int(T * 1.3), 3000),
+        "panel": E("deep", int(T * 3.3), 9000),
+        "style": E("standard", int(T * 1.2), max(1, paras // 12) * 1500),
+        "aitone": E("standard", int(T * 1.2), max(1, paras // 10) * 2000),
+        "cites": E("standard", n_cites * 5000, n_cites * 500),
+        "uncited": E("standard", int(T * 1.1), 2500),
+        "discuss": E("standard", 20000, 5000),
+        "recent": E("light", 3000, 200),
+        "refs": 0,
+        "autoall": E("standard", n_need * 6000, n_need * 500),
+        "matrix_per_paper": E("standard", 6500, 1500),
+        "gaps": E("deep", rows * 700 + 1500, 3000),
+        "intro": E("deep", rows * 800 + 3000, 2500) + E("standard", 6000 * 2, 400),
+        "meter": E("standard", rows * 900 + 1000, 2000),
+        "ask": E("standard", 7000, 1200),
+        "explain": E("standard", 2500, 600),
+        "scan_per_pdf": E("light", 2000, 200),
+    }
+    return {"engine": llm.engine_for(pid), "won": est, "month": llm.usage_this_month(), "cap": int(db.get_settings().get("monthly_cap_won") or 0)}

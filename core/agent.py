@@ -14,7 +14,7 @@ SYS = (
 # ① 연구계획 ---------------------------------------------------------------
 def plan(topic, log):
     log("주제를 분석해 검색어를 만드는 중…")
-    kw = llm.chat(
+    kw = llm.light(
         f"논문 주제: {topic}\n\n이 주제의 선행연구를 찾기 위한 검색어를 만들어 주세요. "
         "en_query는 학술 DB 검색용 영어 검색어 한 줄(3~6단어), ko_query는 한국어 검색어 한 줄.",
         system=SYS,
@@ -51,7 +51,7 @@ def plan(topic, log):
     )
     refs += "".join(f"\n[내PC] {c['cite']} {c['title']}: {c['text'][:200]}" for c in local[:5])
     log(("Claude가" if llm.engine() == "claude" else "로컬 AI가") + " 연구 경로를 설계하는 중…" + ("" if llm.engine() == "claude" else " (몇 분 걸릴 수 있어요)"))
-    p = llm.chat(
+    p = llm.deep(
         f"논문 주제: {topic}\n\n아래는 실제로 검색된 선행연구 목록입니다. 이것만 근거로 삼아 답하세요. "
         "선행연구를 언급할 때는 [번호]로 표시하세요.\n\n"
         f"{refs}\n\n"
@@ -128,7 +128,7 @@ def refine_route(topic, idea, lit, log):
     """사용자가 제안한 연구 경로를 AI 추천과 같은 형식으로 정리하고, 보완점을 짚어준다."""
     log("제안하신 연구 경로를 정리하는 중…")
     refs = "\n".join(f"[{i + 1}] {w['title']} ({w['year']})" for i, w in enumerate(lit[:12]))
-    r = llm.chat(
+    r = llm.deep(
         f"논문 주제: {topic}\n\n[연구자가 직접 제안한 연구 경로]\n{idea}\n\n[검색된 선행연구]\n{refs}\n\n"
         "연구자의 제안을 존중해서 그 의도를 바꾸지 말고, 다음 형식으로 한국어로 정리하세요: "
         "name(짧은 이름), questions(연구문제 2~3개), method(연구방법), data(대상·자료 수집 방법), analysis(분석 방법), "
@@ -384,7 +384,7 @@ def _pick(sentence, cands):
 
 def _en_query(sentence):
     try:
-        r = llm.chat(
+        r = llm.light(
             f"다음 문장의 근거 논문을 찾기 위한 영어 학술 검색어(3~6단어)를 만드세요.\n{sentence}",
             schema={"type": "object", "properties": {"q": {"type": "string"}}, "required": ["q"]},
             num_ctx=2048,

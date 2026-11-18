@@ -51,10 +51,20 @@ def models():
         return None
 
 
-def chat(prompt, system=None, schema=None, temperature=0.2, num_ctx=8192, model=None, num_predict=1500):
+# Claude를 쓸 때 일의 무게에 따라 모델을 나눈다 (비용 절약)
+TIERS = {
+    "deep": ("claude-opus-5-5", "medium"),  # 판단: 심사·연구계획·연구 공백·서론
+    "standard": ("claude-sonnet-5-5", "medium"),  # 정리·작성: 집필·문헌분석표·근거 찾기·문장 점검
+    "light": ("claude-haiku-5-5", "low"),  # 단순: 저자·연도 읽기·검색어
+}
+PRICES = {"claude-opus-5-5": (4.0, 20.0), "claude-sonnet-5-5": (2.0, 10.0), "claude-haiku-5-5": (0.10, 0.50)}  # 100만 토큰당 $
+WON_PER_USD = 1400
+
+
+def chat(prompt, system=None, schema=None, temperature=0.2, num_ctx=8192, model=None, num_predict=1500, tier="standard"):
     """schema(JSON Schema)를 주면 그 형식의 dict를 돌려준다. num_predict는 폭주 방지용 출력 상한(로컬)."""
     if engine() == "claude":
-        return _claude(prompt, system, schema)
+        return _claude(prompt, system, schema, tier)
     msgs = []
     if system:
         msgs.append({"role": "system", "content": system})
@@ -145,7 +155,15 @@ def _strict(schema):
     return sc
 
 
-def _claude(prompt, system=None, schema=None):
+def deep(*a, **k):
+    return chat(*a, tier="deep", **k)
+
+
+def light(*a, **k):
+    return chat(*a, tier="light", **k)
+
+
+def _claude(prompt, system=None, schema=None, tier="standard"):
     import anthropic
 
     global _client, _client_key
@@ -155,18 +173,23 @@ def _claude(prompt, system=None, schema=None):
     if _client is None or _client_key != key:
         _client = anthropic.Anthropic(api_key=key, timeout=600)
         _client_key = key
+    cap = int(db.get_settings().get("monthly_cap_won") or 0)
+    if cap and usage_this_month()["won"] >= cap:
+        raise RuntimeError(f"이번 달 Claude 사용 한도({cap:,}원)에 도달해 멈췄어요. ⚙ 설정에서 한도를 올리거나 로컬 AI로 바꿔 주세요.")
+    model, effort = TIERS.get(tier, TIERS["standard"])
     kw = {}
     if system:
         kw["system"] = system
-    out_cfg = {"effort": "medium"}
+    if model != "claude-haiku-5-5":  # Haiku는 서버 쪽 대체(fallback)가 없음
+        kw["betas"] = ["server-side-fallback-2026-07-01"]
+        kw["fallbacks"] = "default"
+    out_cfg = {"effort": effort}
     if schema:
         out_cfg["format"] = {"type": "json_schema", "schema": _strict(schema)}
     try:
         resp = _client.beta.messages.create(
-            model=CLAUDE_MODEL,
+            model=model,
             max_tokens=16000,
-            betas=["server-side-fallback-2026-07-01"],
-            fallbacks="default",
             output_config=out_cfg,
             messages=[{"role": "user", "content": prompt}],
             **kw,
@@ -197,14 +220,22 @@ def _claude(prompt, system=None, schema=None):
         return json.loads(m.group(0)) if m else {}
 
 
-# 추정 요금 (claude-opus-5-5: 입력 $4 / 출력 $20, 100만 토큰당) — 실제 청구액은 콘솔 기준
-PRICE_IN, PRICE_OUT, WON_PER_USD = 4.0, 20.0, 1400
+def cost_usd(model, inp, out):
+    pi, po = next((v for k, v in PRICES.items() if (model or "").startswith(k)), PRICES["claude-opus-5-5"])
+    return inp / 1e6 * pi + out / 1e6 * po
 
 
 def usage_this_month():
-    r = db.q(
-        "SELECT COALESCE(SUM(input),0) i, COALESCE(SUM(output),0) o, COUNT(*) n FROM usage WHERE ts >= strftime('%Y-%m-01', 'now', 'localtime')",
-        one=True,
+    """이번 달 이 앱에서 쓴 Claude 금액 (모델별 요금으로 계산한 어림값 — 실제 청구액은 콘솔 기준)."""
+    rows = db.q(
+        "SELECT model, COALESCE(SUM(input),0) i, COALESCE(SUM(output),0) o, COUNT(*) n FROM usage WHERE ts >= strftime('%Y-%m-01', 'now', 'localtime') GROUP BY model"
     )
-    usd = r["i"] / 1e6 * PRICE_IN + r["o"] / 1e6 * PRICE_OUT
-    return {"calls": r["n"], "input": r["i"], "output": r["o"], "usd": round(usd, 2), "won": int(round(usd * WON_PER_USD, -1))}
+    usd = sum(cost_usd(r["model"], r["i"], r["o"]) for r in rows)
+    return {"calls": sum(r["n"] for r in rows), "input": sum(r["i"] for r in rows), "output": sum(r["o"] for r in rows),
+            "usd": round(usd, 2), "won": int(round(usd * WON_PER_USD, -1))}
+
+
+def estimate_won(tier, inp_tokens, out_tokens):
+    """실행 전 예상 금액(원). 생각(thinking)도 출력으로 청구되므로 출력은 넉넉히 잡는다."""
+    model = TIERS[tier][0]
+    return max(1, int(round(cost_usd(model, inp_tokens, out_tokens * (1 if tier == "light" else 1.8)) * WON_PER_USD)))

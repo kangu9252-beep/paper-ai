@@ -96,7 +96,7 @@ def job_out(j):
 def get_job(jid: str):
     j = JOBS.get(jid)
     if not j:
-        raise HTTPException(404)
+        raise HTTPException(404, "작업 없음")  # 앱이 다시 켜져서 사라진 작업
     return job_out(j)
 
 
@@ -344,17 +344,30 @@ async def upload(files: list[UploadFile] = File(...)):
     return {"job": Job("index", fn).id}
 
 
+SCAN_QUEUE = []  # PDF 읽기는 한 번에 하나만: 읽는 중에 들어온 폴더는 이어서 읽는다
+
+
 @app.post("/api/scan")
 def scan(d: dict = Body(default={})):
     only = [f for f in (d or {}).get("folders", []) if isinstance(f, str) and os.path.isdir(f)]
+    running = next((j for j in JOBS.values() if j.kind == "scan" and j.status == "running"), None)
+    if running:
+        SCAN_QUEUE.append(only or db.get_settings()["scan_folders"])
+        running.say("새로 고른 폴더는 지금 작업이 끝나면 이어서 읽어요")
+        return {"job": running.id, "queued": True}
 
     def fn(j):
         pdfindex.scan_folders(only or db.get_settings()["scan_folders"], log=j.say, stop=j.stop)
+        while SCAN_QUEUE and not j.stop():
+            j.say("이어서 새로 고른 폴더를 읽어요")
+            pdfindex.scan_folders(SCAN_QUEUE.pop(0), log=j.say, stop=j.stop)
+        SCAN_QUEUE.clear()
         j.say("PDF 읽기 끝 — 이제 근거 찾기가 돼요. 이어서 의미 검색을 준비해요(오래 걸리면 중지해도 돼요)")
         pdfindex.embed_missing(log=j.say, stop=j.stop)
         j.say("완료")
 
-    return {"job": Job("scan", fn, llm.engine_for(None)).id}  # 저자·연도 읽기는 설정한 AI로 (Claude면 빠름)
+    eng = llm.engine_for(None) if db.get_settings().get("scan_with_claude") else "local"  # 기본은 무료인 로컬 AI
+    return {"job": Job("scan", fn, eng).id}
 
 
 @app.get("/api/search")
@@ -468,11 +481,14 @@ async def import_into(pid: int, file: UploadFile | None = File(None), text: str 
 
 
 @app.post("/api/projects/{pid}/review/{tool}")
-def run_review(pid: int, tool: str, target: str = ""):
+def run_review(pid: int, tool: str, target: str = "", force: int = 0):
     if tool == "panel" and target:
         matrix._save_report(pid, "panel_target", target)
     if tool != "full" and tool not in review.TOOLS:
         raise HTTPException(404)
+    if tool != "full" and not force and review.unchanged(pid, tool):
+        msg = "원고가 지난번 점검 때와 같아서 다시 돌리지 않았어요 (0원). 새로 하려면 '새로 실행'을 누르세요."
+        return {"job": Job("review", lambda j: j.say(msg), "local").id, "cached": True}
     fn = review.full_review if tool == "full" else review.TOOLS[tool]
     feature = None if tool == "refs" else tool  # 참고문헌 대조는 AI를 쓰지 않음
     return {"job": Job("review", lambda j: fn(pid, j.say, j.stop), llm.engine_for(pid), pid, feature).id}
@@ -489,7 +505,8 @@ def matrix_build(pid: int, d: dict = Body(...)):
     ids = [int(x) for x in d.get("paper_ids", [])][:60]
     if not ids:
         raise HTTPException(400, "정리할 논문을 골라주세요")
-    return {"job": Job("matrix", lambda j: matrix.build(pid, ids, j.say, j.stop), llm.engine_for(pid), pid, "matrix").id}
+    force = bool(d.get("force"))
+    return {"job": Job("matrix", lambda j: matrix.build(pid, ids, j.say, j.stop, force), llm.engine_for(pid), pid, "matrix").id}
 
 
 @app.delete("/api/projects/{pid}/matrix/{paper_id}")
@@ -510,13 +527,18 @@ def matrix_csv(pid: int):
 
 
 @app.post("/api/projects/{pid}/gaps")
-def matrix_gaps(pid: int):
-    return {"job": Job("gaps", lambda j: matrix.gaps(pid, j.say, j.stop), llm.engine_for(pid), pid, "gaps").id}
+def matrix_gaps(pid: int, force: int = 0):
+    return {"job": Job("gaps", lambda j: matrix.gaps(pid, j.say, j.stop, bool(force)), llm.engine_for(pid), pid, "gaps").id}
 
 
 @app.post("/api/projects/{pid}/intro")
-def matrix_intro(pid: int):
-    return {"job": Job("intro", lambda j: matrix.intro(pid, j.say, j.stop), llm.engine_for(pid), pid, "intro").id}
+def matrix_intro(pid: int, force: int = 0):
+    return {"job": Job("intro", lambda j: matrix.intro(pid, j.say, j.stop, bool(force)), llm.engine_for(pid), pid, "intro").id}
+
+
+@app.get("/api/projects/{pid}/estimates")
+def estimates(pid: int):
+    return review.estimates(pid)
 
 
 @app.post("/api/projects/{pid}/map")

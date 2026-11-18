@@ -364,3 +364,8 @@ dialog.fpick { width: 640px; max-width: calc(100vw - 32px); }
 .pg-bar { height: 6px; background: var(--surface-2); border-radius: 3px; overflow: hidden; }
 .pg-bar span { display: block; height: 100%; width: 0; background: var(--accent); border-radius: 3px; transition: width .4s; }
 .pg-t { color: var(--muted); margin-top: 2px; }
+
+/* 예상 금액 */
+.cost { font-size: 12px; color: #8a5a00; background: #fff3d6; border-radius: 99px; padding: 2px 9px; white-space: nowrap; align-self: center; }
+.cost.free { color: var(--accent); background: var(--accent-soft); }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .cost:not(.free) { background: #3d3220; color: #f0c060; } }
