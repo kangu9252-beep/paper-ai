@@ -40,6 +40,7 @@ async function api(path, opts = {}) {
   } catch {
     throw new Error("앱이 꺼져 있어요. 바탕화면 '논문 AI' 아이콘으로 다시 켠 뒤 이 페이지를 새로고침(F5) 해주세요.");
   }
+  if (r.status === 401 && !path.startsWith("/api/auth/")) { showLogin(); throw new Error("로그인이 필요해요"); }
   if (!r.ok) {
     let msg = r.statusText;
     try { msg = (await r.json()).detail || msg; } catch {}
@@ -152,6 +153,11 @@ async function refreshStatus() {
   try {
     const s = await api("/api/status");
     S.status = s;
+    if (s.guest) {
+      el.className = s.me?.has_key ? "status ok" : "status bad";
+      el.textContent = s.me?.has_key ? `${s.me.name}님 · 내 자료 ${s.papers}편` : `${s.me?.name || ""}님 · Claude 키를 넣어 주세요`;
+      return;
+    }
     if (!s.models) {
       el.className = "status bad";
       el.textContent = "로컬 AI(Ollama)가 꺼져 있어요";
@@ -574,7 +580,7 @@ async function renderCollect() {
         ${p.plan ? `<button id="moreBtn">🌐 인터넷에서 더 수집</button>` : ""}
         <span class="grow"></span><button id="toMatrix">③ 문헌분석으로 →</button><button class="primary" id="toWrite">④ 집필로 →</button>
       </div>
-      <p class="small muted">내 자료 폴더: ${esc((S.status?.settings?.scan_folders || []).join(" · "))} (설정에서 변경)</p></div>
+      <p class="small muted owner-only">내 자료 폴더: ${esc((S.status?.settings?.scan_folders || []).join(" · "))} (설정에서 변경)</p></div>
     <div class="card" id="refFolders"><div class="row"><h3 class="grow">📁 이 논문이 참조할 폴더</h3><button class="primary" id="refPick">폴더 고르기</button></div>
       <p class="small muted" style="margin:2px 0 8px">정해 두면 이 논문의 근거 찾기·문헌분석·집필이 <b>고른 폴더 안의 PDF에서만</b> 이뤄져요. 다른 과목 자료가 섞이지 않아 더 빠르고 정확해요.</p>
       ${(p.ref_folders || []).length ? `<div class="fp-sel">${p.ref_folders.map((f) => `<span class="fp-chip" title="${esc(f)}">📁 ${esc(f)}</span>`).join("")}</div>
@@ -1598,7 +1604,7 @@ async function renderReview() {
   const body = $("#tabBody");
   const has = (p.content || "").replace(/<[^>]+>/g, "").trim().length > 30;
   let sched = { rows: [], next: "", task: "none" };
-  try { sched = await api("/api/schedule"); } catch {}
+  if (!S.guest) try { sched = await api("/api/schedule"); } catch {}
   const mine = sched.rows.filter((r) => r.project_id === p.id && r.status !== "done").slice(0, 10);
   const rj = reviewJob[p.id];
   const card = ([k, t, d]) => `<div class="card" id="tool-${k}"><div class="row"><h3 class="grow">${t}</h3>
@@ -1958,14 +1964,15 @@ function claudeWizard(onDone) {
         }
         msg.style.color = "";
         msg.innerHTML = `<span class="spin"></span> 저장하고 연결을 확인하는 중…`;
-        await api("/api/settings", { json: { claude_key: key, engine: "claude" } });
+        if (S.guest) await api("/api/me/key", { json: { key } });
+        else await api("/api/settings", { json: { claude_key: key, engine: "claude" } });
         const r = await api("/api/claude/test", { method: "POST" });
         if (r.ok) {
           msg.innerHTML = `✅ <b>연결 완료!</b> 이제 연구계획·집필·원고 점검을 Claude가 해요.<div class="muted">${esc(r.msg)}</div>`;
           d.querySelector(".row:last-child span").innerHTML = `<button class="primary" id="wzFin">완료</button>`;
           $("#wzFin", d).onclick = () => { d.close(); d.remove(); refreshStatus(); onDone && onDone(); };
         } else {
-          await api("/api/settings", { json: { engine: "local" } });
+          if (!S.guest) await api("/api/settings", { json: { engine: "local" } });
           msg.style.color = "var(--warn)";
           msg.textContent = /크레딧|credit|balance/i.test(r.msg)
             ? "키는 맞는데 크레딧이 없어요. ② 단계로 돌아가 충전한 뒤 다시 시도해 주세요."
@@ -2011,6 +2018,7 @@ async function renderLibrary() {
 
 // ---------- 설정 ----------
 async function renderSettings() {
+  if (S.guest) return renderMySettings();
   S.cur = null;
   loadProjects();
   await refreshStatus();
@@ -2037,6 +2045,7 @@ async function renderSettings() {
         <input id="monthly_cap_won" type="number" min="0" step="1000" value="${s.monthly_cap_won || 0}" style="max-width:160px"></label>
       <p class="small muted">Claude를 골라도 근거 검색·문장 위치 찾기는 항상 내 컴퓨터에서 해요. 새벽 예약 작업과 '로컬 AI만 사용'을 켠 원고는 항상 로컬 AI로 처리돼요.</p>
     </div>
+    <div class="card" id="inviteCard"><h3>👥 친구 초대 (웹 주소로 함께 쓰기)</h3><div class="small muted">불러오는 중…</div></div>
     <div class="card"><h3>🌙 새벽 자동 실행</h3>
       <p class="small muted">낮에 '🌙 새벽 예약'을 눌러둔 일(자료 수집·집필·원고 검토)을 새벽 2시에 로컬 AI로 처리해요(무료).
       아래를 등록하면 매일 01:55에 컴퓨터를 절전에서 깨워 앱을 조용히 켜고, 일을 마치면 스스로 꺼져요. 컴퓨터를 완전히 끄면 실행되지 않아요.</p>
@@ -2100,6 +2109,16 @@ async function renderSettings() {
     $("#claudeMsg").style.color = r.ok ? "" : "var(--warn)";
     refreshStatus();
   };
+  const drawInvite = async () => {
+    const r = await api("/api/users");
+    $("#inviteCard").innerHTML = `<h3>👥 친구 초대 (웹 주소로 함께 쓰기)</h3>
+      <p class="small">친구가 웹 주소로 들어와 가입할 때 넣을 <b>초대 코드: <code style="font-size:16px">${esc(r.code)}</code></b> <button class="small ghost" id="newCode">코드 바꾸기</button></p>
+      <p class="small muted">친구는 자기 Claude 키로 쓰고, 자기 원고·PDF만 봐요. 이 컴퓨터의 폴더·설정·도서관 계정은 친구에게 안 보여요.</p>
+      ${r.users.length ? `<table class="tbl small"><tr><th>이름</th><th>아이디</th><th>가입</th><th>원고</th><th>PDF</th><th></th></tr>${r.users.map((u) => `<tr><td>${esc(u.name)}</td><td>${esc(u.login)}</td><td>${esc((u.created || "").slice(0, 10))}</td><td>${u.projects}</td><td>${u.papers}</td><td><button class="small ghost" data-deluser="${u.id}">내보내기</button></td></tr>`).join("")}</table>` : `<p class="small muted">아직 가입한 친구가 없어요.</p>`}`;
+    $("#newCode").onclick = async () => { if (!confirm("코드를 바꾸면 예전 코드로는 가입할 수 없어요. 바꿀까요?")) return; await api("/api/users/code", { method: "POST" }); drawInvite(); };
+    $$("[data-deluser]").forEach((b) => (b.onclick = async () => { if (!confirm("이 친구의 계정과 원고·PDF를 모두 지울까요? 되돌릴 수 없어요.")) return; await api(`/api/users/${b.dataset.deluser}`, { method: "DELETE" }); drawInvite(); }));
+  };
+  drawInvite();
   const nightState = async () => {
     const r = await api("/api/schedule");
     const waiting = r.rows.filter((x) => x.status === "waiting").length;
@@ -2160,4 +2179,72 @@ async function restoreJobs() {
     runJob(j.id, t, { onDone: () => S.cur && j.pid === S.cur.id && openProject(S.cur.id) });
   }
 }
-loadProjects().then(() => { restoreJobs(); return S.projects.length ? openProject(S.projects[0].id) : showWelcome(); });
+boot();
+async function boot() {
+  let st;
+  try { st = await api("/api/status"); } catch { return; }  // 401이면 로그인 화면이 떠 있음
+  S.guest = !!st.guest;
+  document.body.classList.toggle("guest", S.guest);
+  if (S.guest) {
+    $$(".top nav button").forEach((b) => { if (b.dataset.view === "settings") b.textContent = `👤 내 설정`; });
+    $(".brand .sub").textContent = "모든 문장에 근거";
+  }
+  await loadProjects();
+  restoreJobs();
+  if (S.guest && !st.me?.has_key) claudeWizard(() => refreshStatus());
+  return S.projects.length ? openProject(S.projects[0].id) : showWelcome();
+}
+
+// ---------- 로그인 (웹 주소로 들어온 사람) ----------
+function showLogin() {
+  if ($("#loginBox")) return;
+  const d = document.createElement("div");
+  d.id = "loginBox";
+  d.className = "login-wrap";
+  let mode = "login";
+  const draw = () => {
+    d.innerHTML = `<div class="login card">
+      <h2 style="margin:0 0 4px">📝 논문 AI</h2>
+      <p class="small muted" style="margin:0 0 14px">모든 문장에 근거를 붙여 주는 논문 도우미</p>
+      <div class="row" style="margin-bottom:10px"><button class="${mode === "login" ? "primary" : "ghost"}" data-m="login">로그인</button><button class="${mode === "signup" ? "primary" : "ghost"}" data-m="signup">처음이에요 (가입)</button></div>
+      <label class="field"><span>아이디</span><input id="lgId" autocomplete="username"></label>
+      ${mode === "signup" ? `<label class="field"><span>이름 (화면에 보일 이름)</span><input id="lgName"></label>` : ""}
+      <label class="field"><span>비밀번호${mode === "signup" ? " (6자 이상)" : ""}</span><input id="lgPw" type="password" autocomplete="${mode === "signup" ? "new-password" : "current-password"}"></label>
+      ${mode === "signup" ? `<label class="field"><span>초대 코드 (앱 주인에게 받은 6자리)</span><input id="lgCode" style="text-transform:uppercase"></label>` : ""}
+      <p id="lgMsg" class="small" style="color:var(--warn);min-height:1.2em"></p>
+      <button class="primary" id="lgGo" style="width:100%">${mode === "login" ? "로그인" : "가입하고 시작하기"}</button>
+      <p class="small muted" style="margin-top:12px">각자 자기 Claude API 키로 사용해요. 내 원고와 PDF는 나만 볼 수 있어요.</p></div>`;
+    $$("[data-m]", d).forEach((b) => (b.onclick = () => { mode = b.dataset.m; draw(); }));
+    const go = async () => {
+      const body = { login: $("#lgId", d).value, password: $("#lgPw", d).value };
+      if (mode === "signup") Object.assign(body, { name: $("#lgName", d).value, code: $("#lgCode", d).value });
+      try {
+        await api(`/api/auth/${mode}`, { json: body });
+        location.reload();
+      } catch (e) { $("#lgMsg", d).textContent = e.message; }
+    };
+    $("#lgGo", d).onclick = go;
+    $$("input", d).forEach((i) => (i.onkeydown = (e) => { if (e.key === "Enter") go(); }));
+  };
+  draw();
+  document.body.appendChild(d);
+}
+
+async function renderMySettings() {
+  S.cur = null;
+  loadProjects();
+  const me = await api("/api/me");
+  $("#main").innerHTML = `<div class="pad" style="max-width:640px">
+    <h2>👤 내 설정</h2>
+    <div class="card"><h3>${esc(me.name)} <span class="small muted">(${esc(me.login)})</span></h3>
+      <p>Claude API 키: ${me.has_key ? "✅ 넣어 둠" : "❌ 아직 없음"}</p>
+      <p class="small muted" id="myUsage"></p>
+      <div class="row"><button class="primary" id="myKey">${me.has_key ? "키 바꾸기" : "Claude 키 넣기 (안내 따라 하기)"}</button>
+        ${me.has_key ? `<button class="ghost" id="myKeyDel">키 지우기</button>` : ""}<span class="grow"></span><button id="myOut">로그아웃</button></div>
+      <p class="small muted">내 키는 이 앱에서 내 작업에만 쓰이고, 요금도 내 Anthropic 계정에 나와요. 실행 전에 예상 금액이 표시돼요.</p></div>
+    <div class="card"><h3>안내</h3><p class="small">웹으로 쓸 때는 PDF를 <b>'＋ PDF 파일 추가'</b>로 올려 주세요. 올린 PDF와 원고는 나만 볼 수 있어요. 학교 도서관 자동 다운로드와 새벽 예약은 앱 주인 컴퓨터에서만 돼요.</p></div></div>`;
+  api("/api/claude/usage").then((u) => { $("#myUsage").textContent = `이번 달 이 앱에서 쓴 Claude 요금: 약 ${(u.won || 0).toLocaleString()}원`; }).catch(() => {});
+  $("#myKey").onclick = () => claudeWizard(renderMySettings);
+  if ($("#myKeyDel")) $("#myKeyDel").onclick = async () => { if (!confirm("저장된 키를 지울까요?")) return; await api("/api/me/key", { json: { key: "" } }); renderMySettings(); refreshStatus(); };
+  $("#myOut").onclick = async () => { await api("/api/auth/logout", { method: "POST" }); location.reload(); };
+}

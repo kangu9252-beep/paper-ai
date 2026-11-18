@@ -81,7 +81,9 @@ def _fname(meta):
 
 
 def _save(content, meta):
-    path = db.PAPERS_DIR / _fname(meta)
+    from . import users
+
+    path = users.papers_dir() / _fname(meta)
     i = 1
     while path.exists():
         path = path.with_name(path.stem + f"_{i}.pdf")
@@ -109,13 +111,19 @@ def download_open(meta, log=print):
     return None
 
 
+def _uid():
+    from . import users
+
+    return users.uid()
+
+
 def already_have(meta):
     if meta.get("doi"):
-        r = db.q("SELECT id FROM papers WHERE lower(doi)=lower(?)", (meta["doi"],), one=True)
+        r = db.q("SELECT id FROM papers WHERE lower(doi)=lower(?) AND COALESCE(user_id,0)=?", (meta["doi"], _uid()), one=True)
         if r:
             return r["id"]
     if meta.get("title"):
-        r = db.q("SELECT id FROM papers WHERE lower(title)=lower(?)", (meta["title"],), one=True)
+        r = db.q("SELECT id FROM papers WHERE lower(title)=lower(?) AND COALESCE(user_id,0)=?", (meta["title"], _uid()), one=True)
         if r:
             return r["id"]
     return None
@@ -125,6 +133,10 @@ def fetch_paper(meta, log=print, allow_library=True):
     """공개 PDF → 안 되면 도서관 경유. 성공 시 라이브러리에 등록된 paper id."""
     from . import library, pdfindex
 
+    from . import users
+
+    if users.is_guest():
+        allow_library = False  # 학교 도서관 로그인은 주인 계정이라 다른 사람은 못 씀
     have = already_have(meta)
     if have:
         return have

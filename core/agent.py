@@ -510,12 +510,18 @@ def autofind(sentence, author, year, log):
     return {"status": "none", "candidates": [{k: c[k] for k in ("id", "cite", "title", "page")} for c in cands]}
 
 
+def _uid():
+    from . import users
+
+    return users.uid()
+
+
 def references(chunk_ids):
     ids = list({int(c) for c in chunk_ids if str(c).isdigit()})
     if not ids:
         return []
     rows = db.q(
-        f"SELECT DISTINCT p.* FROM papers p JOIN chunks c ON c.paper_id=p.id WHERE c.id IN ({','.join('?' * len(ids))})", ids
+        f"SELECT DISTINCT p.* FROM papers p JOIN chunks c ON c.paper_id=p.id WHERE c.id IN ({','.join('?' * len(ids))}) AND COALESCE(p.user_id,0)=?", ids + [_uid()]
     )
     out = []
     for p in rows:

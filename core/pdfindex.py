@@ -261,9 +261,9 @@ def index_pdf(path, meta=None, source="local", log=print, embed=True):
         )
     else:
         pid = db.x(
-            "INSERT INTO papers(path,title,authors,year,doi,venue,source,status,pages,mtime) VALUES(?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO papers(path,title,authors,year,doi,venue,source,status,pages,mtime,user_id) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
             (path, meta.get("title"), json.dumps(meta.get("authors", []), ensure_ascii=False), meta.get("year", ""),
-             meta.get("doi", ""), meta.get("venue", ""), source, status, npages, mtime),
+             meta.get("doi", ""), meta.get("venue", ""), source, status, npages, mtime, _users().uid()),
         )
     if status != "ok":
         log(f"  글자를 읽을 수 없는 PDF(스캔본일 수 있음): {Path(path).name}")
@@ -441,11 +441,15 @@ def set_scope(folders):
 
 def scope_ids():
     """참조 폴더 안의 논문 id 목록. 폴더를 정하지 않았으면 None(전체)."""
+    from . import users
+
     fs = getattr(_scope, "folders", None)
-    if not fs:
-        return None
+    if users.is_guest() or not fs:  # 웹으로 쓰는 사람: 자기가 올린 PDF만 / 주인: 폴더를 안 정했으면 내 자료 전체
+        if not users.is_guest() and not db.q("SELECT 1 FROM papers WHERE COALESCE(user_id,0)!=0 LIMIT 1", one=True):
+            return None  # 다른 사람 자료가 없으면 예전처럼 전체(빠름)
+        return [r["id"] for r in db.q("SELECT id FROM papers WHERE status='ok' AND COALESCE(user_id,0)=?", (users.uid(),))]
     out = []
-    for r in db.q("SELECT id, path FROM papers WHERE status='ok'"):
+    for r in db.q("SELECT id, path FROM papers WHERE status='ok' AND COALESCE(user_id,0)=0"):
         p = os.path.normcase(os.path.normpath(r["path"]))
         if any(p.startswith(f + os.sep) for f in fs):
             out.append(r["id"])
@@ -540,6 +544,12 @@ def cite_label(authors, year):
     else:
         a = f"{names[0]} 외" if ko else f"{names[0]} et al."
     return f"({a}, {yr})"
+
+
+def _users():
+    from . import users
+
+    return users
 
 
 def find_papers_by_cite(author, year):

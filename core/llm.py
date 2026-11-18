@@ -10,6 +10,8 @@ import numpy as np
 from . import db
 
 CLAUDE_MODEL = "claude-opus-5-5"
+_clients = {}
+_clients_lock = threading.Lock()
 _ctx = threading.local()  # 작업(스레드)마다 쓸 엔진: "local" 또는 "claude"
 
 
@@ -22,13 +24,19 @@ def engine():
 
 
 def claude_key():
-    from . import secret
+    from . import secret, users
 
+    if users.is_guest():  # 웹 주소로 들어온 사람은 자기 키만
+        return users.key()
     return secret.unprotect(db.get_settings().get("claude_key", ""))
 
 
 def engine_for(project_id=None, night=False):
     """이번 작업에 쓸 엔진. 새벽 예약 작업과 '로컬만' 프로젝트는 항상 로컬."""
+    from . import users
+
+    if users.is_guest():
+        return "claude"  # 웹으로 쓰는 사람은 Claude만 (키가 없으면 실행할 때 안내)
     s = db.get_settings()
     if night or s.get("engine") != "claude" or not claude_key():
         return "local"
@@ -248,14 +256,16 @@ def to_english(texts):
 def _claude(prompt, system=None, schema=None, tier="standard"):
     import anthropic
 
-    global _client, _client_key
+    from . import users
+
     key = claude_key()
     if not key:
-        raise RuntimeError("Claude API 키가 없습니다. 설정에서 넣어주세요.")
-    if _client is None or _client_key != key:
-        _client = anthropic.Anthropic(api_key=key, timeout=600)
-        _client_key = key
-    cap = int(db.get_settings().get("monthly_cap_won") or 0)
+        raise RuntimeError("Claude API 키가 없습니다. " + ("오른쪽 위 '내 설정'에서 내 키를 넣어주세요." if users.is_guest() else "설정에서 넣어주세요."))
+    with _clients_lock:  # 사람마다(키마다) 연결을 따로 — 다른 사람 키로 결제되는 일이 없게
+        client = _clients.get(key)
+        if client is None:
+            client = _clients[key] = anthropic.Anthropic(api_key=key, timeout=600)
+    cap = 0 if users.is_guest() else int(db.get_settings().get("monthly_cap_won") or 0)
     if cap and usage_this_month()["won"] >= cap:
         raise RuntimeError(f"이번 달 Claude 사용 한도({cap:,}원)에 도달해 멈췄어요. ⚙ 설정에서 한도를 올리거나 로컬 AI로 바꿔 주세요.")
     model, effort = TIERS.get(tier, TIERS["standard"])
@@ -269,7 +279,7 @@ def _claude(prompt, system=None, schema=None, tier="standard"):
     if schema:
         out_cfg["format"] = {"type": "json_schema", "schema": _strict(schema)}
     try:
-        resp = _client.beta.messages.create(
+        resp = client.beta.messages.create(
             model=model,
             max_tokens=16000,
             output_config=out_cfg,
@@ -287,7 +297,7 @@ def _claude(prompt, system=None, schema=None, tier="standard"):
     try:  # 사용량 기록 (설정 화면의 '이번 달 사용 금액' 표시용)
         u = resp.usage
         inp = (u.input_tokens or 0) + (getattr(u, "cache_creation_input_tokens", 0) or 0) + (getattr(u, "cache_read_input_tokens", 0) or 0)
-        db.x("INSERT INTO usage(model, input, output) VALUES(?, ?, ?)", (resp.model, inp, u.output_tokens or 0))
+        db.x("INSERT INTO usage(model, input, output, user_id) VALUES(?, ?, ?, ?)", (resp.model, inp, u.output_tokens or 0, users.uid()))
     except Exception:
         pass
     if resp.stop_reason == "refusal":
@@ -308,9 +318,12 @@ def cost_usd(model, inp, out):
 
 
 def usage_this_month():
+    from . import users
+
     """이번 달 이 앱에서 쓴 Claude 금액 (모델별 요금으로 계산한 어림값 — 실제 청구액은 콘솔 기준)."""
     rows = db.q(
-        "SELECT model, COALESCE(SUM(input),0) i, COALESCE(SUM(output),0) o, COUNT(*) n FROM usage WHERE ts >= strftime('%Y-%m-01', 'now', 'localtime') GROUP BY model"
+        "SELECT model, COALESCE(SUM(input),0) i, COALESCE(SUM(output),0) o, COUNT(*) n FROM usage WHERE ts >= strftime('%Y-%m-01', 'now', 'localtime') AND COALESCE(user_id,0)=? GROUP BY model",
+        (users.uid(),),
     )
     usd = sum(cost_usd(r["model"], r["i"], r["o"]) for r in rows)
     return {"calls": sum(r["n"] for r in rows), "input": sum(r["i"] for r in rows), "output": sum(r["o"] for r in rows),

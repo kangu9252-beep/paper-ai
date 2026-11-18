@@ -61,7 +61,9 @@ def candidates(pid):
                 cited.add(hit["id"])
                 why.setdefault(hit["id"], f"원고에 인용됨 {c.get_text().strip()}")
     out, seen = [], set()
-    for r in db.q("SELECT id, title, authors, year FROM papers WHERE status='ok' ORDER BY id DESC"):
+    from . import users
+
+    for r in db.q("SELECT id, title, authors, year FROM papers WHERE status='ok' AND COALESCE(user_id,0)=? ORDER BY id DESC", (users.uid(),)):
         key = (re.sub(r"\W", "", r["title"] or "")[:40], r["year"])
         if key in seen:  # 같은 PDF가 여러 폴더에 있으면 하나만
             continue

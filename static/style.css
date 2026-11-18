@@ -381,3 +381,10 @@ dialog.fpick { width: 640px; max-width: calc(100vw - 32px); }
 @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .fp-cov.warn { background: #3d3220; } }
 .fp-sug { display: flex; gap: 8px; align-items: center; margin-top: 4px; }
 .fp-sug span:first-child { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* 웹 주소로 들어온 사람: 이 컴퓨터 전용 기능 숨김 */
+body.guest #scanBtn, body.guest #refFolders, body.guest .gd-card, body.guest [data-night], body.guest #aiWriteNight,
+body.guest #approveNight, body.guest #fullNight, body.guest .owner-only, body.guest label:has(#localOnly) { display: none !important; }
+.login-wrap { position: fixed; inset: 0; background: var(--bg); display: flex; align-items: center; justify-content: center; z-index: 200; padding: 16px; }
+.login { width: 100%; max-width: 380px; }
+.tbl { border-collapse: collapse; width: 100%; } .tbl th, .tbl td { text-align: left; padding: 4px 6px; border-bottom: 1px solid var(--line); }

@@ -410,7 +410,9 @@ def _state(pid):
     text = BeautifulSoup(p.get("content") or "", "html.parser")
     cites = text.select("span.cite")
     m = json.loads(p.get("matrix") or "{}")
-    papers = db.q("SELECT COUNT(*) n FROM papers WHERE status='ok'", one=True)["n"]
+    from . import users
+
+    papers = db.q("SELECT COUNT(*) n FROM papers WHERE status='ok' AND COALESCE(user_id,0)=?", (users.uid(),), one=True)["n"]
     lines = [
         f"논문 제목: {p.get('title')}", f"주제: {p.get('topic')}",
         f"길잡이 유형: {PERSONA.get((rep.get('guide') or {}).get('persona'), '아직 안 고름')}",

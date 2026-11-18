@@ -11,15 +11,54 @@ import uuid
 import webbrowser
 from pathlib import Path
 
-from fastapi import Body, FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse, Response
+from fastapi import Body, FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from core import agent, db, explore, library, llm, matrix, night, pdfindex, review, secret
+import contextvars
+
+from core import agent, db, explore, library, llm, matrix, night, pdfindex, review, secret, users
 
 app = FastAPI()
 STATIC = Path(__file__).parent / "static"
 JOBS = {}
+
+
+# ---------- 검문: 웹 주소(터널)로 들어온 사람은 로그인 + 자기 자료만 ----------
+OWNER_ONLY = ("/api/fs", "/api/settings", "/api/scan", "/api/library", "/api/schedule", "/api/night", "/api/users")
+OWN_PROJECT = re.compile(r"^/api/projects/(\d+)")
+OWN_PAPER = re.compile(r"^/api/(?:papers|paper|page|pdf)/(\d+)")
+
+
+def is_remote(request):
+    return bool(request.headers.get("cf-connecting-ip")) or (request.url.hostname or "") not in ("127.0.0.1", "localhost")
+
+
+@app.middleware("http")
+async def gate(request: Request, call_next):
+    path = request.url.path
+    if not is_remote(request):
+        users.set_uid(0)
+        return await call_next(request)
+    if not path.startswith("/api/"):
+        users.set_uid(users.ANON)
+        return await call_next(request)  # 화면 파일(로그인 화면 포함)
+    if path.startswith("/api/auth/"):
+        users.set_uid(users.ANON)
+        return await call_next(request)
+    u = users.session_user(request.cookies.get(COOKIE))
+    if not u:
+        return JSONResponse({"detail": "로그인이 필요해요"}, status_code=401)
+    users.set_uid(u)
+    if path.startswith(OWNER_ONLY):
+        return JSONResponse({"detail": "이 기능은 앱 주인 컴퓨터에서만 쓸 수 있어요"}, status_code=403)
+    m = OWN_PROJECT.match(path)
+    if m and not users.owns_project(int(m.group(1))):
+        return JSONResponse({"detail": "없는 프로젝트예요"}, status_code=404)
+    m = OWN_PAPER.match(path)
+    if m and not users.owns_paper(int(m.group(1))):
+        return JSONResponse({"detail": "없는 자료예요"}, status_code=404)
+    return await call_next(request)
 
 
 # ---------- 백그라운드 작업 ----------
@@ -29,6 +68,7 @@ class Job:
         self.kind, self.status, self.log, self.result, self.emitted, self.stopped = kind, "running", [], None, [], False
         JOBS[self.id] = self
         self.pid, self.feature, self.t1 = pid, feature, None
+        self.uid = users.uid()
 
         self.engine = engine
         self.t0 = time.time()
@@ -50,7 +90,8 @@ class Job:
             finally:
                 self.t1 = time.time()
 
-        threading.Thread(target=run, daemon=True).start()
+        ctx = contextvars.copy_context()  # 작업 스레드도 같은 사람으로
+        threading.Thread(target=lambda: ctx.run(run), daemon=True).start()
 
     def say(self, msg):
         self.log.append(str(msg))
@@ -101,7 +142,7 @@ def list_jobs():
     now = time.time()
     out = []
     for j in JOBS.values():
-        if j.kind == "assist":
+        if j.kind == "assist" or j.uid != users.uid():
             continue
         if j.status == "running" or (j.status == "error" and j.t1 and now - j.t1 < 1800):
             out.append({"id": j.id, "kind": j.kind, "feature": j.feature, "pid": j.pid, "status": j.status})
@@ -111,14 +152,14 @@ def list_jobs():
 @app.get("/api/jobs/{jid}")
 def get_job(jid: str):
     j = JOBS.get(jid)
-    if not j:
+    if not j or j.uid != users.uid():
         raise HTTPException(404, "작업 없음")  # 앱이 다시 켜져서 사라진 작업
     return job_out(j)
 
 
 @app.post("/api/jobs/{jid}/stop")
 def stop_job(jid: str):
-    if jid in JOBS:
+    if jid in JOBS and JOBS[jid].uid == users.uid():
         JOBS[jid].stopped = True
     return {"ok": True}
 
@@ -177,6 +218,12 @@ def fs_list(path: str = ""):
 
 @app.get("/api/status")
 def status():
+    if users.is_guest():
+        me = users.me()
+        n = db.q("SELECT COUNT(*) n FROM papers WHERE status='ok' AND user_id=?", (users.uid(),), one=True)["n"]
+        return {"guest": True, "me": me, "models": [], "papers": n, "chunks": 0, "no_emb": 0, "gdrive": "",
+                "settings": {"engine": "claude", "claude_key": "********" if me.get("has_key") else "", "scan_folders": []},
+                "jobs": [job_out(j) | {"log": j.log[-1:]} for j in JOBS.values() if j.status == "running" and j.uid == users.uid()]}
     s = db.get_settings()
     s["lib_pw"] = "********" if s.get("lib_pw") else ""
     s["claude_key"] = "********" if s.get("claude_key") else ""
@@ -187,7 +234,8 @@ def status():
         "no_emb": db.q("SELECT COUNT(*) n FROM chunks WHERE emb IS NULL", one=True)["n"],
         "settings": s,
         "gdrive": GDRIVE if GDRIVE and GDRIVE not in s.get("scan_folders", []) else "",
-        "jobs": [job_out(j) | {"log": j.log[-1:]} for j in JOBS.values() if j.status == "running"],
+        "jobs": [job_out(j) | {"log": j.log[-1:]} for j in JOBS.values() if j.status == "running" and j.uid == 0],
+        "guest": False,
     }
 
 
@@ -214,13 +262,13 @@ def save_settings(d: dict = Body(...)):
 # ---------- 프로젝트 ----------
 @app.get("/api/projects")
 def projects():
-    return db.q("SELECT id, title, topic, updated FROM projects ORDER BY updated DESC")
+    return db.q("SELECT id, title, topic, updated FROM projects WHERE COALESCE(user_id,0)=? ORDER BY updated DESC", (users.uid(),))
 
 
 @app.post("/api/projects")
 def new_project(d: dict = Body(...)):
     topic = d.get("topic", "").strip()
-    pid = db.x("INSERT INTO projects(title, topic) VALUES(?, ?)", (d.get("title") or topic[:40] or "새 논문", topic))
+    pid = db.x("INSERT INTO projects(title, topic, user_id) VALUES(?, ?, ?)", (d.get("title") or topic[:40] or "새 논문", topic, users.uid()))
     return {"id": pid}
 
 
@@ -246,7 +294,7 @@ def put_project(pid: int, d: dict = Body(...)):
     for k in ("title", "topic", "content", "route", "local_only"):
         if k in d:
             db.x(f"UPDATE projects SET {k}=?, updated=datetime('now','localtime') WHERE id=?", (d[k], pid))
-    if isinstance(d.get("ref_folders"), list):
+    if isinstance(d.get("ref_folders"), list) and not users.is_guest():
         db.x("UPDATE projects SET ref_folders=? WHERE id=?", (json.dumps([str(x) for x in d["ref_folders"]], ensure_ascii=False), pid))
     return {"ok": True}
 
@@ -318,7 +366,7 @@ def write(pid: int, d: dict = Body(...)):
 # ---------- 라이브러리 ----------
 @app.get("/api/papers")
 def papers():
-    rows = db.q("SELECT id, path, title, authors, year, doi, source, status, pages, added FROM papers ORDER BY added DESC")
+    rows = db.q("SELECT id, path, title, authors, year, doi, source, status, pages, added FROM papers WHERE COALESCE(user_id,0)=? ORDER BY added DESC", (users.uid(),))
     for r in rows:
         r["authors"] = json.loads(r["authors"] or "[]")
         r["cite"] = pdfindex.cite_label(r["authors"], r["year"])
@@ -348,7 +396,7 @@ async def upload(files: list[UploadFile] = File(...)):
     for f in files:
         if not f.filename.lower().endswith(".pdf"):
             continue
-        dest = db.PAPERS_DIR / Path(f.filename).name
+        dest = users.papers_dir() / Path(f.filename).name
         with open(dest, "wb") as out:
             shutil.copyfileobj(f.file, out)
         saved.append(dest)
@@ -461,6 +509,8 @@ def lookup(author: str, year: str = ""):
 
 @app.get("/api/evidence")
 def evidence(chunk: int, quote: str = ""):
+    if not users.owns_chunk(chunk):
+        raise HTTPException(404, "근거 자료가 라이브러리에서 사라졌습니다.")
     e = pdfindex.evidence(chunk, quote)
     if not e:
         raise HTTPException(404, "근거 자료가 라이브러리에서 사라졌습니다.")
@@ -487,18 +537,86 @@ def pdf(pid: int):
 
 @app.post("/api/autofind")
 def autofind(d: dict = Body(...)):
+    if d.get("project_id") and not users.owns_project(d["project_id"]):
+        raise HTTPException(404)
     return {"job": Job("autofind", lambda j: agent.autofind(d.get("sentence", ""), d.get("author", ""), d.get("year", ""), j.say), llm.engine_for(d.get("project_id")), d.get("project_id"), "autofind").id}
 
 
 @app.post("/api/references")
 def references(d: dict = Body(...)):
-    return agent.references(d.get("chunks", []))
+    return agent.references([c for c in d.get("chunks", []) if str(c).isdigit() and users.owns_chunk(int(c))])
 
 
 @app.post("/api/library/login")
 def lib_login():
     return {"job": Job("login", lambda j: j.say(library.login(j.say))).id}
 
+
+
+# ---------- 로그인 (웹 주소로 들어온 사람) ----------
+COOKIE = "pa_session"
+
+
+@app.post("/api/auth/signup")
+def auth_signup(d: dict = Body(...)):
+    try:
+        users.signup(d.get("login"), d.get("name"), d.get("password"), d.get("code"))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return auth_login(d)
+
+
+@app.post("/api/auth/login")
+def auth_login(d: dict = Body(...), request: Request = None):
+    ip = (request.headers.get("cf-connecting-ip") if request else "") or ""
+    try:
+        tok = users.login(d.get("login"), d.get("password"), ip)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    r = JSONResponse({"ok": True})
+    r.set_cookie(COOKIE, tok, max_age=30 * 86400, httponly=True, secure=True, samesite="lax")
+    return r
+
+
+@app.post("/api/auth/logout")
+def auth_logout(request: Request):
+    users.logout(request.cookies.get(COOKIE))
+    r = JSONResponse({"ok": True})
+    r.delete_cookie(COOKIE)
+    return r
+
+
+@app.get("/api/me")
+def me():
+    return users.me()
+
+
+@app.post("/api/me/key")
+def me_key(d: dict = Body(...)):
+    if not users.is_guest():
+        raise HTTPException(400)
+    users.set_key(d.get("key", ""))
+    return {"ok": True}
+
+
+# 주인용: 친구 초대 코드·사용자 관리
+@app.get("/api/users")
+def users_list():
+    return {"code": users.invite_code(), "users": users.list_users()}
+
+
+@app.post("/api/users/code")
+def users_new_code():
+    import secrets as _s
+
+    db.set_settings({"invite_code": _s.token_hex(3).upper()})
+    return {"code": users.invite_code()}
+
+
+@app.delete("/api/users/{user_id}")
+def users_delete(user_id: int):
+    users.delete_user(user_id)
+    return {"ok": True}
 
 
 @app.get("/api/claude/usage")
@@ -539,7 +657,7 @@ async def import_new(file: UploadFile | None = File(None), text: str = Form(""),
             name = title or (text.strip().splitlines() or ["불러온 원고"])[0][:40]
     except ValueError as e:
         raise HTTPException(400, str(e))
-    pid = db.x("INSERT INTO projects(title, topic, content) VALUES(?, ?, ?)", (name, name, content))
+    pid = db.x("INSERT INTO projects(title, topic, content, user_id) VALUES(?, ?, ?, ?)", (name, name, content, users.uid()))
     return {"id": pid}
 
 
@@ -575,7 +693,7 @@ def matrix_get(pid: int):
 
 @app.post("/api/projects/{pid}/matrix")
 def matrix_build(pid: int, d: dict = Body(...)):
-    ids = [int(x) for x in d.get("paper_ids", [])][:60]
+    ids = [int(x) for x in d.get("paper_ids", []) if users.owns_paper(int(x))][:60]
     if not ids:
         raise HTTPException(400, "정리할 논문을 골라주세요")
     force = bool(d.get("force"))
@@ -660,6 +778,8 @@ def guide_set(pid: int, d: dict = Body(...)):
 @app.post("/api/assist")
 def assist(d: dict = Body(...)):
     pid = d.get("project_id")
+    if pid and not users.owns_project(pid):
+        raise HTTPException(404)
     msgs = [m for m in d.get("messages", []) if isinstance(m, dict)][-12:]
     if not msgs:
         raise HTTPException(400, "질문을 적어주세요")
@@ -669,6 +789,8 @@ def assist(d: dict = Body(...)):
 @app.post("/api/explain")
 def explain(d: dict = Body(...)):
     pid = d.get("project_id")
+    if not str(d.get("chunk", "")).isdigit() or not users.owns_chunk(int(d["chunk"])) or (pid and not users.owns_project(pid)):
+        raise HTTPException(404)
     return {"job": Job("explain", lambda j: explore.explain(int(d["chunk"]), d.get("quote", ""), j.say), llm.engine_for(pid), pid, "explain").id}
 
 
