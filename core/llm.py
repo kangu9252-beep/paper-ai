@@ -93,6 +93,48 @@ _embed_ok = None
 _embed_fail_at = 0.0
 
 
+BUILTIN_MODEL = "minishlab/potion-multilingual-128M"  # 앱에 들어 있는 작은 다국어 모델: 설치 없이 빠름(CPU로 초당 수십 조각)
+_builtin = {"m": None}
+_builtin_lock = threading.Lock()
+
+
+def embed_backend():
+    return db.get_settings().get("embed_backend") or "builtin"
+
+
+def embed_name():
+    """지금 쓰는 검색 모델 이름 (벡터를 섞어 쓰지 않도록 구분용)"""
+    return BUILTIN_MODEL if embed_backend() == "builtin" else db.get_settings()["embed_model"]
+
+
+_dim = {}
+
+
+def embed_dim():
+    n = embed_name()
+    if n not in _dim:
+        v = embed(["확인"])
+        if v is None:
+            return None
+        _dim[n] = v.shape[1]
+    return _dim[n]
+
+
+def _embed_builtin(texts):
+    from pathlib import Path
+
+    with _builtin_lock:
+        if _builtin["m"] is None:
+            from fastembed import TextEmbedding
+
+            cache = Path(__file__).resolve().parent.parent / "data" / "models"
+            cache.mkdir(parents=True, exist_ok=True)
+            _builtin["m"] = TextEmbedding(BUILTIN_MODEL, cache_dir=str(cache))
+        v = np.array(list(_builtin["m"].embed([t[:2000] for t in texts], batch_size=32)), dtype=np.float32)
+    v /= np.linalg.norm(v, axis=1, keepdims=True) + 1e-9
+    return v
+
+
 def embed(texts):
     """문장들을 의미 벡터로. 검색 모델이 없으면 None. (꺼져 있으면 1분 뒤 다시 시도)"""
     global _embed_ok, _embed_fail_at
@@ -100,6 +142,18 @@ def embed(texts):
 
     if not texts or (_embed_ok is False and time.time() - _embed_fail_at < 60):
         return None
+    if embed_backend() == "builtin":
+        try:
+            v = _embed_builtin(texts)
+            _embed_ok = True
+            return v
+        except Exception:
+            import traceback
+
+            traceback.print_exc()
+            _embed_ok = False
+            _embed_fail_at = time.time()
+            return None
     try:
         r = httpx.post(
             _url() + "/api/embed",

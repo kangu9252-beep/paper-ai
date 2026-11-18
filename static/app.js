@@ -932,7 +932,7 @@ function modelSvg(m) {
 }
 
 // ---------- 📁 폴더 고르기 창 (탐색기처럼 펼쳐 보며 체크) ----------
-function folderPicker({ title, hint, selected = [], onSave }) {
+function folderPicker({ title, hint, selected = [], onSave, cover = null }) {
   const sel = [...selected];
   const d = document.createElement("dialog");
   d.className = "wizard fpick";
@@ -941,11 +941,12 @@ function folderPicker({ title, hint, selected = [], onSave }) {
   const chips = () => sel.length ? sel.map((f, i) => `<span class="fp-chip" title="${esc(f)}">📁 ${esc(f.split(/[\\/]/).filter(Boolean).slice(-2).join(" › "))}<b data-rm="${i}">✕</b></span>`).join("") : `<span class="small muted">아직 고른 폴더가 없어요</span>`;
   const draw = async () => {
     d.innerHTML = `<h3 style="margin:0 0 4px">${esc(title)}</h3><p class="small muted" style="margin:0 0 8px">${esc(hint || "")}</p>
-      <div class="fp-sel">${chips()}</div>
+      <div class="fp-sel">${chips()}</div><div class="fp-cover"></div>
       <div class="fp-nav"><button class="small" id="fpUp" ${cur ? "" : "disabled"}>⬆ 위로</button><span class="small muted fp-path">${esc(cur || "내 컴퓨터")}</span></div>
       <div class="fp-list"><div class="small muted"><span class="spin"></span> 폴더를 살펴보는 중…</div></div>
       <div class="row" style="justify-content:flex-end;margin-top:10px"><button class="ghost" id="fpCancel">취소</button><button class="primary" id="fpSave">이 폴더들로 정하기 (${sel.length})</button></div>`;
     $$("[data-rm]", d).forEach((b) => (b.onclick = () => { sel.splice(+b.dataset.rm, 1); draw(); }));
+    drawCover();
     $("#fpCancel", d).onclick = () => { d.close(); d.remove(); };
     $("#fpSave", d).onclick = () => { d.close(); d.remove(); onSave(sel); };
     let r;
@@ -965,11 +966,29 @@ function folderPicker({ title, hint, selected = [], onSave }) {
       if (b.checked && i < 0) sel.push(pth);
       if (!b.checked && i >= 0) sel.splice(i, 1);
       $(".fp-sel", d).innerHTML = chips();
+      drawCover();
       $("#fpSave", d).textContent = `이 폴더들로 정하기 (${sel.length})`;
       $$("[data-rm]", d).forEach((x) => (x.onclick = () => { sel.splice(+x.dataset.rm, 1); draw(); }));
     }));
     if ($("#fpHere", d)) $("#fpHere", d).onclick = (e) => { e.preventDefault(); if (!sel.includes(cur)) sel.push(cur); draw(); };
   };
+  // 원고에 인용된 논문이 고른 폴더에서 몇 개나 찾아지는지 + 추천 폴더
+  const norm = (x) => x.toLowerCase().replace(/[\\/]+$/, "");
+  const inSel = (dir) => sel.some((f) => { const a = norm(dir), b = norm(f); return a === b || a.startsWith(b + "\\") || a.startsWith(b + "/"); });
+  function drawCover() {
+    const box = $(".fp-cover", d);
+    if (!box || !cover) return;
+    if (!cover.total) { box.innerHTML = ""; return; }
+    const ok = cover.cites.filter((c) => c.dirs.some(inSel)).length;
+    const sug = cover.suggest.filter((s) => !inSel(s.path));
+    const warn = sel.length && ok < cover.found;
+    box.innerHTML = `<div class="fp-cov ${warn ? "warn" : ""}">
+      <b>원고에 인용된 논문 ${cover.total}편 중 고른 폴더에서 찾을 수 있는 것: ${ok}편</b>
+      <span class="small muted">(내 자료 전체에는 ${cover.found}편이 있어요${cover.found < cover.total ? ` · 나머지 ${cover.total - cover.found}편은 아직 PDF가 없거나 읽지 않았어요` : ""})</span>
+      ${sug.length ? `<div class="small" style="margin-top:6px">인용된 논문이 들어 있는 폴더:</div>` + sug.map((s, i) => `<div class="fp-sug"><span title="${esc(s.path)}">📁 ${esc(s.path.split(/[\\/]/).filter(Boolean).slice(-3).join(" › "))}</span><span class="small muted">인용 ${s.n}편</span><button class="small" data-sug="${i}">＋ 추가</button></div>`).join("") : ""}
+    </div>`;
+    $$("[data-sug]", box).forEach((b) => (b.onclick = () => { const pth = sug[+b.dataset.sug].path; if (!sel.includes(pth)) sel.push(pth); draw(); }));
+  }
   d.showModal();
   draw();
 }
@@ -979,8 +998,9 @@ async function chooseRefFolders(after) {
   const p = S.cur;
   folderPicker({
     title: "📁 이 논문이 참조할 폴더",
-    hint: "고른 폴더 안의 PDF에서만 근거를 찾아요. 하위 폴더까지 함께 읽어요. 비워 두면 내 자료 전체에서 찾아요.",
+    hint: "⚠ 이 논문과 관련된 논문만 모아 둔 폴더를 골라 주세요. 드라이브 전체나 큰 폴더를 고르면 상관없는 PDF까지 다 읽느라 비용(Claude 사용료)과 시간이 많이 들어요. 고른 폴더 안의 PDF에서만 근거를 찾고, 하위 폴더까지 함께 읽어요.",
     selected: p.ref_folders || [],
+    cover: await api(`/api/projects/${p.id}/cite_folders`).catch(() => null),
     onSave: async (sel) => {
       await api(`/api/projects/${p.id}`, { method: "PUT", json: { ref_folders: sel } });
       const all = S.status?.settings?.scan_folders || [];
@@ -2000,7 +2020,10 @@ async function renderSettings() {
     <h2>⚙ 설정</h2>
     <div class="card"><h3>로컬 AI</h3>
       <label class="field"><span>글쓰기 모델 (클수록 똑똑하지만 느림)</span><select id="model">${opt(s.model, models.filter((m) => !m.includes("bge")))}</select></label>
-      <label class="field"><span>검색 모델 (한국어·영어 의미 검색)</span><select id="embed_model">${opt(s.embed_model, models)}</select></label>
+      <label class="field"><span>의미 검색 방식</span><select id="embed_backend">
+        <option value="builtin" ${s.embed_backend !== "ollama" ? "selected" : ""}>앱 내장 모델 — 빠름, 설치 필요 없음 (추천)</option>
+        <option value="ollama" ${s.embed_backend === "ollama" ? "selected" : ""}>Ollama 검색 모델 — 조금 더 정확, 아주 느림</option></select></label>
+      <label class="field"><span>Ollama 검색 모델 (위에서 Ollama를 고를 때만)</span><select id="embed_model">${opt(s.embed_model, models)}</select></label>
       <label class="chk"><input type="checkbox" id="strict_verify" ${s.strict_verify ? "checked" : ""}> 엄격 검증 — AI가 쓴 문장의 인용구가 원문에서 확인되지 않으면 '?'로 표시</label>
       ${models.length ? "" : `<p style="color:var(--warn)">Ollama가 꺼져 있어요. 시작 메뉴에서 Ollama를 실행해 주세요.</p>`}
     </div>
@@ -2039,7 +2062,7 @@ async function renderSettings() {
     <button class="primary" id="saveSet">저장</button>
   </div>`;
   const collect = () => ({
-    model: $("#model").value, embed_model: $("#embed_model").value, strict_verify: $("#strict_verify").checked,
+    model: $("#model").value, embed_model: $("#embed_model").value, embed_backend: $("#embed_backend").value, strict_verify: $("#strict_verify").checked,
     scan_folders: $("#scan_folders").value.split("\n").map((x) => x.trim()).filter(Boolean),
     max_downloads: +$("#max_downloads").value || 15,
     scan_with_claude: $("#scan_with_claude").checked,

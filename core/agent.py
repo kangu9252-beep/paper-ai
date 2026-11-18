@@ -209,8 +209,17 @@ def match_quotes(claims, chunks):
     out = []
     for k, (text, idx) in enumerate(claims):
         if cv is None or sv is None:
-            c = chunks[idx] if 0 <= idx < len(chunks) else None
-            out.append((c, "", 0.0))
+            if not sents:
+                c = chunks[idx] if 0 <= idx < len(chunks) else None
+                out.append((c, "", 0.0))
+                continue
+            tw = set(pdfindex.tokens(text))
+            def ov(i):
+                sw = set(pdfindex.tokens(sents[i][1]))
+                return len(tw & sw) / (len(tw) or 1) + (0.05 if sents[i][0] == idx else 0)
+            bi = max(range(len(sents)), key=ov)
+            ci, quote = sents[bi]
+            out.append((chunks[ci], quote, round(ov(bi) * 0.6, 3)))  # 의미 검색보다 약한 점수
             continue
         sims = sv @ cv[k]
         best_i = int(sims.argmax())

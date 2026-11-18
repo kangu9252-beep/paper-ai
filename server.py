@@ -193,6 +193,8 @@ def status():
 
 @app.post("/api/settings")
 def save_settings(d: dict = Body(...)):
+    pdfindex.invalidate()  # 의미 검색 방식이 바뀌면 벡터를 다시 불러옴
+    llm.reset_embed_check()
     for k in ("claude_key",):
         if k in d:
             if d[k] == "********":
@@ -360,6 +362,58 @@ async def upload(files: list[UploadFile] = File(...)):
     return {"job": Job("index", fn).id}
 
 
+@app.get("/api/projects/{pid}/cite_folders")
+def cite_folders(pid: int):
+    """원고에 인용된 논문이 내 자료의 어느 폴더에 있는지 → 참조 폴더 추천 (AI 안 씀, 무료)"""
+    from bs4 import BeautifulSoup
+
+    p = db.q("SELECT content FROM projects WHERE id=?", (pid,), one=True) or {}
+    soup = BeautifulSoup(p.get("content") or "", "html.parser")
+    pdfindex.set_scope([])  # 내 자료 전체에서
+    cites, seen = [], set()
+    for c in soup.select("span.cite"):
+        t = c.get_text().strip()
+        mm = re.match(r"^\(?\s*(.+?)\s*,\s*((?:19|20)\d{2})", t) or re.match(r"^(.+?)\s?\(((?:19|20)\d{2})", t)
+        if not mm:
+            continue
+        a = re.sub(r"\s*(외|et al\.?|등)\s*$", "", mm.group(1).strip())
+        key = (re.split(r"\s*(?:,|&|and|·)\s*", a)[0].lower(), mm.group(2))
+        if key in seen:
+            continue
+        seen.add(key)
+        dirs = sorted({os.path.dirname(x["path"]) for x in pdfindex.find_papers_by_cite(mm.group(1), mm.group(2))})
+        cites.append({"label": t, "dirs": dirs})
+    # 가장 많은 인용을 담은 폴더부터 차례로 (같은 논문이 여러 폴더에 있어도 한 번만 셈)
+    left = [set(c["dirs"]) for c in cites if c["dirs"]]
+    suggest = []
+    while left and len(suggest) < 5:
+        cnt = {}
+        for ds in left:
+            for d in ds:
+                cnt[d] = cnt.get(d, 0) + 1
+        best = max(cnt, key=lambda d: (cnt[d], -len(d)))
+        suggest.append({"path": best, "n": cnt[best]})
+        left = [ds for ds in left if best not in ds]
+    return {"total": len(cites), "found": sum(1 for c in cites if c["dirs"]), "cites": cites, "suggest": suggest}
+
+
+def cited_in_projects(folders):
+    """고른 폴더를 참조하는 논문(프로젝트)의 원고에 인용된 논문 id"""
+    ids = set()
+    fs = {os.path.normcase(os.path.normpath(f)) for f in folders}
+    for r in db.q("SELECT id FROM projects"):
+        pf = project_folders(r["id"])
+        if not pf or not fs & {os.path.normcase(os.path.normpath(f)) for f in pf}:
+            continue
+        try:
+            pdfindex.set_scope(pf)
+            ids |= {c["id"] for c in matrix.candidates(r["id"]) if c["suggested"]}
+        except Exception:
+            traceback.print_exc()
+    pdfindex.set_scope([])
+    return ids
+
+
 SCAN_QUEUE = []  # PDF 읽기는 한 번에 하나만: 읽는 중에 들어온 폴더는 이어서 읽는다
 
 
@@ -382,7 +436,7 @@ def scan(d: dict = Body(default={})):
             pdfindex.scan_folders(nxt, log=j.say, stop=j.stop)
         SCAN_QUEUE.clear()
         j.say("PDF 읽기 끝 — 이제 근거 찾기가 돼요. 이어서 고른 폴더의 의미 검색을 준비해요(오래 걸리면 중지해도 돼요)")
-        pdfindex.embed_missing(log=j.say, stop=j.stop, folders=done)
+        pdfindex.embed_missing(log=j.say, stop=j.stop, folders=done, first=cited_in_projects(done))
         j.say("완료")
 
     eng = llm.engine_for(None) if db.get_settings().get("scan_with_claude") else "local"  # 기본은 무료인 로컬 AI

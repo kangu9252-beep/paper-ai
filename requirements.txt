@@ -10,3 +10,4 @@ beautifulsoup4
 python-docx
 winocr
 pillow
+fastembed

@@ -86,6 +86,7 @@ def xmany(sql, rows):
 DEFAULTS = {
     "model": "qwen2.5:7b-instruct",
     "embed_model": "bge-m3",
+    "embed_backend": "builtin",  # builtin: 앱 내장 작은 모델(빠름) / ollama: bge-m3(조금 더 정확, 느림)
     "ollama_url": "http://127.0.0.1:11434",
     "scan_folders": [str(PAPERS_DIR), str(Path.home() / "Documents"), str(Path.home() / "Downloads")],
     "strict_verify": True,

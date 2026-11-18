@@ -331,16 +331,53 @@ def scan_folders(folders, log=print, stop=lambda: False):
     return len(todo)
 
 
-def embed_missing(log=print, stop=lambda: False, folders=None):
-    """folders를 주면 그 폴더 안 PDF의 조각만 준비한다(내 자료 전체를 다 하지 않음)."""
-    rows = db.q("SELECT c.id, c.text, p.path FROM chunks c JOIN papers p ON p.id = c.paper_id WHERE c.emb IS NULL")
+def _missing_rows(paper_ids=None):
+    dim = llm.embed_dim()
+    if not dim:
+        return None
+    where, args = "", [dim * 4]
+    if paper_ids is not None:
+        if not paper_ids:
+            return []
+        where = f" AND c.paper_id IN ({','.join('?' * len(paper_ids))})"
+        args += list(paper_ids)
+    return db.q(f"SELECT c.id, c.text, c.paper_id, p.path FROM chunks c JOIN papers p ON p.id = c.paper_id WHERE (c.emb IS NULL OR length(c.emb)!=?){where}", args)
+
+
+def ensure_embedded(paper_ids, limit=400):
+    """검색할 논문 중 준비 안 된 조각이 조금이면 그 자리에서 바로 준비 (그때그때)."""
+    rows = _missing_rows(list(paper_ids))
+    if not rows or len(rows) > limit:
+        return
+    for i in range(0, len(rows), 64):
+        part = rows[i : i + 64]
+        vec = llm.embed([r["text"] for r in part])
+        if vec is None:
+            return
+        db.xmany("UPDATE chunks SET emb=? WHERE id=?", [(vec[j].tobytes(), r["id"]) for j, r in enumerate(part)])
+    invalidate()
+
+
+def embed_missing(log=print, stop=lambda: False, folders=None, first=None):
+    """folders를 주면 그 폴더 안 PDF의 조각만 준비한다(내 자료 전체를 다 하지 않음).
+    first: 원고에 인용된 논문 id — 이것부터 준비해서 근거 찾기가 바로 좋아지게."""
+    llm.reset_embed_check()
+    rows = _missing_rows()
+    if rows is None:
+        log("검색 모델을 쓸 수 없어 의미 검색 준비를 건너뜀 (낱말 검색으로는 찾을 수 있어요)")
+        return
     if folders:
         roots = [os.path.normcase(os.path.abspath(f)).rstrip("\\/") + os.sep for f in folders]
         rows = [r for r in rows if any(os.path.normcase(r["path"]).startswith(x) for x in roots)]
     if not rows:
         log("의미 검색 준비: 고른 폴더는 이미 다 준비돼 있어요")
         return
-    llm.reset_embed_check()
+    if first:
+        fs = set(first)
+        rows.sort(key=lambda r: r["paper_id"] not in fs)
+        n_first = sum(r["paper_id"] in fs for r in rows)
+        if n_first:
+            log(f"원고에 인용된 논문 {len(fs)}편의 조각 {n_first}개를 먼저 준비해요")
     log(f"의미 검색 준비: 조각 {len(rows)}개 (그동안에도 낱말 검색으로는 찾을 수 있어요)")
     total = (len(rows) + 31) // 32
     for i in range(0, len(rows), 32):
@@ -350,7 +387,7 @@ def embed_missing(log=print, stop=lambda: False, folders=None):
         part = rows[i : i + 32]
         vec = llm.embed([r["text"] for r in part])
         if vec is None:
-            log("검색 모델(bge-m3)을 쓸 수 없어 건너뜀")
+            log("검색 모델을 쓸 수 없어 건너뜀")
             return
         db.xmany("UPDATE chunks SET emb=? WHERE id=?", [(vec[j].tobytes(), r["id"]) for j, r in enumerate(part)])
     invalidate()
@@ -365,7 +402,8 @@ def invalidate():
 def _load_emb():
     with _emb_lock:
         if _emb_cache["ids"] is None:
-            rows = db.q("SELECT id, paper_id, emb FROM chunks WHERE emb IS NOT NULL")
+            dim = llm.embed_dim()
+            rows = db.q("SELECT id, paper_id, emb FROM chunks WHERE emb IS NOT NULL AND length(emb)=?", (dim * 4,)) if dim else []
             if rows:
                 _emb_cache["ids"] = np.array([r["id"] for r in rows])
                 _emb_cache["papers"] = np.array([r["paper_id"] for r in rows])
@@ -434,6 +472,8 @@ def search(query, k=10, paper_ids=None, per_paper=3):
             scores[h["id"]] = scores.get(h["id"], 0) + idf
     kw_max = max(scores.values()) if scores else 1
     comb = {cid: 0.35 * s / kw_max for cid, s in scores.items()}
+    if paper_ids:
+        ensure_embedded(paper_ids)
     ids, papers, mat = _load_emb()
     if mat is not None and len(ids):
         qv = llm.embed([query])
