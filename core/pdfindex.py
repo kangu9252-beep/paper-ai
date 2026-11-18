@@ -64,9 +64,10 @@ def _ocr_lines(page):
     return out
 
 
-def extract_chunks(path):
+def extract_chunks(path, log=None):
     doc = pymupdf.open(path)
     out, in_refs = [], False
+    n_ocr = 0
     for pno, page in enumerate(doc):
         if in_refs:
             break
@@ -89,6 +90,9 @@ def extract_chunks(path):
             lines.extend(blines)
             lines.append(None)  # 블록 경계
         if not in_refs and sum(len(x[0]) for x in lines if x) < 30 and page.get_images():
+            n_ocr += 1
+            if log and (n_ocr == 1 or (pno + 1) % 5 == 0):  # 멈춘 게 아니라는 걸 보이도록 몇 쪽째인지 알림
+                log(f"  └ 사진으로 된 PDF라 글자 인식 중… {pno + 1}/{len(doc)}쪽")
             ocr = _ocr_lines(page)  # 글자가 없는 스캔본 쪽
             for item in ocr:
                 if item and REF_HEAD.match(item[0]) and pno >= len(doc) * 0.4:
@@ -239,7 +243,7 @@ def index_pdf(path, meta=None, source="local", log=print, embed=True):
     if old and abs((old["mtime"] or 0) - mtime) < 1 and old["status"] != "notext":  # notext: 글자 인식 전 스캔본 → 다시 읽기
         return old["id"]
     try:
-        chunks, npages = extract_chunks(path)
+        chunks, npages = extract_chunks(path, log)
     except Exception as e:
         log(f"  읽기 실패: {Path(path).name} ({e})")
         return None
