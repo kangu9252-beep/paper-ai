@@ -3,6 +3,8 @@ import html
 import json
 import re
 
+import numpy as np
+
 from . import db, library, llm, pdfindex, web
 
 SYS = (
@@ -206,6 +208,11 @@ def match_quotes(claims, chunks):
     sents = [(ci, s) for ci, c in enumerate(chunks) for s in split_sents(c["text"])]
     cv = llm.embed([t for t, _ in claims])
     sv = llm.embed([s for _, s in sents]) if sents else None
+    ev = None  # 영어 자료면 영어로 옮긴 주장 문장으로도 비교
+    if cv is not None and sv is not None and any(not re.search(r"[가-힣]", s) for _, s in sents[:40]):
+        ens = llm.to_english([t for t, _ in claims])
+        if any(ens):
+            ev = llm.embed([e or t for e, (t, _) in zip(ens, claims)])
     out = []
     for k, (text, idx) in enumerate(claims):
         if cv is None or sv is None:
@@ -221,7 +228,7 @@ def match_quotes(claims, chunks):
             ci, quote = sents[bi]
             out.append((chunks[ci], quote, round(ov(bi) * 0.6, 3)))  # 의미 검색보다 약한 점수
             continue
-        sims = sv @ cv[k]
+        sims = sv @ cv[k] if ev is None else np.maximum(sv @ cv[k], sv @ ev[k])
         best_i = int(sims.argmax())
         own = [i for i, (ci, _) in enumerate(sents) if ci == idx]
         if own:
@@ -391,6 +398,45 @@ def _pick(sentence, cands):
     return {"chunk_id": c["id"], "quote": q, "cite": c["cite"], "title": c["title"], "reason": r.get("reason", "")}
 
 
+def find_in_paper(sentence, paper_ids, max_chars=150000):
+    """인용한 논문을 통째로 Claude(Haiku)에게 읽혀 근거 문장을 찾는다.
+    검색 모델로 후보를 고르면 한국어 문장↔영어 논문에서 자주 놓쳐서 이 방법을 먼저 쓴다. 한 편에 2~5원 안팎.
+    로컬 AI면 너무 느려서 None (기존 방식으로)."""
+    if llm.engine() != "claude" or not paper_ids:
+        return None
+    for pid in paper_ids[:2]:
+        rows = db.q("SELECT c.id, c.page, c.text, p.title, p.authors, p.year FROM chunks c JOIN papers p ON p.id=c.paper_id WHERE c.paper_id=? ORDER BY c.page, c.id", (pid,))
+        if not rows:
+            continue
+        parts, size = [], 0
+        for r in rows:
+            if size > max_chars:
+                break
+            parts.append(f"<c{r['id']}> (p.{r['page'] + 1}) {r['text']}")
+            size += len(r["text"])
+        try:
+            res = llm.light(
+                f"[주장 문장]\n{sentence}\n\n[논문 원문 — 조각마다 <c번호>]\n" + "\n".join(parts) + "\n\n"
+                "위 논문에서 주장 문장을 직접 뒷받침하는 부분을 찾으세요. chunk에 조각 번호(숫자만), quote에 원문을 글자 그대로 "
+                "(번역하지 말고) 10~40단어 복사하세요. 뒷받침하는 부분이 없으면 chunk를 0으로 하세요. 비슷한 주제일 뿐 내용이 다르면 0입니다.",
+                system=SYS,
+                schema={"type": "object", "properties": {"chunk": {"type": "integer"}, "quote": {"type": "string"}, "reason": {"type": "string"}}, "required": ["chunk", "quote", "reason"]},
+            )
+        except Exception:
+            continue
+        cid = int(res.get("chunk") or 0)
+        by = {r["id"]: r for r in rows}
+        q = res.get("quote", "")
+        c = by.get(cid)
+        if not c or not pdfindex.locate(c["text"], q):
+            c = next((r for r in rows if pdfindex.locate(r["text"], q)), None) if q else None
+        if not c:
+            continue
+        a = json.loads(c["authors"] or "[]")
+        return {"chunk_id": c["id"], "quote": q, "cite": pdfindex.cite_label(a, c["year"]), "title": c["title"], "reason": res.get("reason", "")}
+    return None
+
+
 def _en_query(sentence):
     try:
         r = llm.light(
@@ -414,12 +460,16 @@ def autofind(sentence, author, year, log):
         papers = pdfindex.find_papers_by_cite(author, year)
         if papers:
             log(f"내 컴퓨터에서 '{author}, {year}' 논문 발견: {papers[0]['title'][:60]}")
+            hit = find_in_paper(sentence, [p["id"] for p in papers])
+            if hit:
+                log("논문 전체를 읽고 근거 위치 찾음")
+                return {"status": "linked", **hit}
             # 인용한 논문 안에서는 더 넓게 본다 (스캔본은 글자 인식 오타로 순위가 밀릴 수 있음)
             hit = _pick(sentence, pdfindex.search(sentence, k=10, paper_ids=[p["id"] for p in papers], per_paper=10))
             if hit:
                 log("근거 위치 찾음")
                 return {"status": "linked", **hit}
-            log("논문은 있지만 이 문장을 뒷받침하는 부분을 찾지 못함")
+            log("이 PDF를 끝까지 읽었지만 이 문장을 뒷받침하는 부분이 없어요 — 파일이 맞는 논문인지(견본·요약본·다른 논문) 확인해 주세요")
         else:
             log(f"내 컴퓨터에 '{author}, {year}' 논문이 없음 → 인터넷에서 찾는 중…")
             enq = _en_query(sentence)

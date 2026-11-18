@@ -217,6 +217,34 @@ def light(*a, **k):
     return chat(*a, tier="light", **k)
 
 
+_en_cache = {}
+
+
+def to_english(texts):
+    """한국어 문장을 영어로 (영어 논문에서 근거를 찾을 때 같은 언어끼리 비교하려고).
+    Claude일 때 가장 싼 Haiku로 한 번에 — 문장 10개에 1원 안팎. 로컬 AI면 너무 느려서 건너뜀(None)."""
+    out = [None] * len(texts)
+    need = [i for i, t in enumerate(texts) if re.search(r"[가-힣]", t or "") and t not in _en_cache]
+    if need and engine() == "claude":
+        for s in range(0, len(need), 20):
+            part = need[s : s + 20]
+            block = "\n".join(f"{k + 1}. {texts[i][:600]}" for k, i in enumerate(part))
+            try:
+                r = light(
+                    f"다음 한국어 문장을 각각 자연스러운 학술 영어 한 문장으로 옮기세요. 고유명사·척도명은 영어 원래 이름으로.\n{block}",
+                    schema={"type": "object", "properties": {"items": {"type": "array", "items": {"type": "object", "properties": {"n": {"type": "integer"}, "en": {"type": "string"}}, "required": ["n", "en"]}}}, "required": ["items"]},
+                )
+                for x in r.get("items", []):
+                    k = int(x.get("n", 0)) - 1
+                    if 0 <= k < len(part) and x.get("en"):
+                        _en_cache[texts[part[k]]] = x["en"]
+            except Exception:
+                pass
+    for i, t in enumerate(texts):
+        out[i] = _en_cache.get(t)
+    return out
+
+
 def _claude(prompt, system=None, schema=None, tier="standard"):
     import anthropic
 

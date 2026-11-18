@@ -463,7 +463,10 @@ def search(query, k=10, paper_ids=None, per_paper=3):
         args = list(paper_ids)
     total = db.q("SELECT COUNT(*) n FROM chunks WHERE 1=1" + where, args, one=True)["n"] or 1
     scores = {}
-    for t in tokens(query):
+    # 한국어 문장으로 영어 논문을 찾을 때: 영어로 옮긴 문장도 함께 (같은 언어끼리 비교해야 잘 찾음)
+    en = llm.to_english([query])[0] if re.search(r"[가-힣]", query) else None
+    qtok = tokens(query) + (tokens(en) if en else [])
+    for t in list(dict.fromkeys(qtok)):
         hits = db.q(f"SELECT id FROM chunks WHERE lower(text) LIKE ?{where} LIMIT 5000", ["%" + t + "%"] + args)
         if not hits or len(hits) > total * 0.5 and total > 20:
             continue
@@ -476,9 +479,9 @@ def search(query, k=10, paper_ids=None, per_paper=3):
         ensure_embedded(paper_ids)
     ids, papers, mat = _load_emb()
     if mat is not None and len(ids):
-        qv = llm.embed([query])
+        qv = llm.embed([query] + ([en] if en else []))
         if qv is not None:
-            sims = mat @ qv[0]
+            sims = (mat @ qv.T).max(axis=1)
             if paper_ids:
                 mask = np.isin(papers, list(paper_ids))
                 sims = np.where(mask, sims, -1)

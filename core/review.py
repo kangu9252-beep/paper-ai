@@ -328,6 +328,9 @@ def check_citations(pid, log, stop=lambda: False, use_internet=True):
 
 def _local_find(sent, author, year):
     ids = [p["id"] for p in pdfindex.find_papers_by_cite(author, year)] if author else None
+    hit = agent.find_in_paper(sent, ids) if ids else None
+    if hit:
+        return {"status": "linked", **hit}
     hit = agent._pick(sent, pdfindex.search(sent, k=5, paper_ids=ids or None, per_paper=5 if ids else 2))
     return {"status": "linked", **hit} if hit else None
 
