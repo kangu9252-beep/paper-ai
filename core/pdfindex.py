@@ -195,6 +195,8 @@ def guess_meta(path, chunks):
             }
         except Exception:
             pass
+    if named:  # AI가 실패해도 파일 이름의 저자·연도는 살린다
+        return named
     return {"title": Path(path).stem, "authors": [], "year": "", "doi": ""}
 
 
@@ -437,6 +439,8 @@ def find_papers_by_cite(author, year):
     out = []
     for p in db.q("SELECT id, title, authors, year, path FROM papers WHERE status='ok'"):
         if year and p["year"] and p["year"][:4] != year[:4]:
+            continue
+        if year and not p["year"] and year[:4] not in Path(p["path"]).stem:  # 연도를 모르는 논문은 파일 이름의 연도라도 맞아야
             continue
         auths = json.loads(p["authors"] or "[]")
         blob = " ".join(auths) + " " + Path(p["path"]).stem

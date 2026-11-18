@@ -258,3 +258,22 @@ dialog.wizard code { background: var(--surface-2); padding: 1px 5px; border-radi
 table.aiuse { width: 100%; border-collapse: collapse; font-size: 13px; }
 table.aiuse th, table.aiuse td { text-align: left; padding: 4px 6px; border-bottom: 1px solid var(--line); }
 table.aiuse th { color: var(--muted); font-weight: 600; }
+
+/* ③ 문헌분석 */
+.mx-wrap { overflow-x: auto; margin-top: 10px; border: 1px solid var(--line); border-radius: 8px; }
+table.mx { border-collapse: collapse; font-size: 12px; min-width: 1100px; }
+table.mx th { position: sticky; top: 0; background: var(--surface-2); color: var(--muted); font-weight: 600; text-align: left; padding: 6px 8px; white-space: nowrap; }
+table.mx td { vertical-align: top; padding: 6px 8px; border-top: 1px solid var(--line); max-width: 230px; line-height: 1.5; }
+table.mx td.mx-paper { min-width: 160px; }
+table.mx td.mx-ev { cursor: pointer; }
+table.mx td.mx-ev:hover { background: var(--accent-soft); }
+table.mx td.mx-nochk { color: var(--muted); font-style: italic; }
+table.mx td.mx-none { color: var(--muted); text-align: center; }
+table.mx tr.flash td { background: var(--accent-soft); }
+.mx-picker { margin-top: 10px; border: 1px solid var(--line); border-radius: 8px; padding: 10px; }
+.mx-list { max-height: 320px; overflow: auto; margin: 8px 0; }
+.mx-cand { display: block; padding: 3px 0; font-size: 13px; }
+.mx-ref { display: inline-block; font-size: 12px; color: var(--accent); cursor: pointer; margin-right: 6px; }
+.mx-ref:hover { text-decoration: underline; }
+.intro-prev { max-height: 420px; overflow: auto; margin-top: 8px; padding: 16px 20px; border: 1px solid var(--line); border-radius: 8px; }
+.intro-prev .cite { cursor: pointer; }

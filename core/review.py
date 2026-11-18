@@ -808,6 +808,9 @@ FEATURES = {
     "write": ("본문 초안 작성", "draft"),
     "discuss": ("논의 보강 제안", "draft"),
     "discuss_insert": ("AI 제안 문장을 논의에 넣음", "draft"),
+    "matrix": ("문헌분석표 만들기", "lit"),
+    "gaps": ("연구 동향·공백 분석", "lit"),
+    "intro": ("서론 초안 작성", "draft"),
 }
 PURPOSE = {
     "lit": ("선행연구 탐색과 정리", "literature search and organization"),

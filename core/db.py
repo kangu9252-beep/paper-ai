@@ -54,7 +54,7 @@ CREATE TABLE IF NOT EXISTS schedule (
 );
 """
 )
-for col, ddl in (("local_only", "INTEGER DEFAULT 0"), ("reports", "TEXT DEFAULT '{}'")):
+for col, ddl in (("local_only", "INTEGER DEFAULT 0"), ("reports", "TEXT DEFAULT '{}'"), ("matrix", "TEXT DEFAULT '{}'")):
     try:
         _conn.execute(f"ALTER TABLE projects ADD COLUMN {col} {ddl}")
     except sqlite3.OperationalError:

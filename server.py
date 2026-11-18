@@ -12,7 +12,7 @@ from fastapi import Body, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from core import agent, db, library, llm, night, pdfindex, review, secret
+from core import agent, db, library, llm, matrix, night, pdfindex, review, secret
 
 app = FastAPI()
 STATIC = Path(__file__).parent / "static"
@@ -376,6 +376,47 @@ def run_review(pid: int, tool: str):
     fn = review.full_review if tool == "full" else review.TOOLS[tool]
     feature = None if tool == "refs" else tool  # 참고문헌 대조는 AI를 쓰지 않음
     return {"job": Job("review", lambda j: fn(pid, j.say, j.stop), llm.engine_for(pid), pid, feature).id}
+
+
+# ---------- ③ 문헌분석 ----------
+@app.get("/api/projects/{pid}/matrix")
+def matrix_get(pid: int):
+    return {"rows": matrix.rows(pid), "candidates": matrix.candidates(pid), "fields": [[k, t] for k, t, _ in matrix.FIELDS]}
+
+
+@app.post("/api/projects/{pid}/matrix")
+def matrix_build(pid: int, d: dict = Body(...)):
+    ids = [int(x) for x in d.get("paper_ids", [])][:60]
+    if not ids:
+        raise HTTPException(400, "정리할 논문을 골라주세요")
+    return {"job": Job("matrix", lambda j: matrix.build(pid, ids, j.say, j.stop), llm.engine_for(pid), pid, "matrix").id}
+
+
+@app.delete("/api/projects/{pid}/matrix/{paper_id}")
+def matrix_del(pid: int, paper_id: int):
+    _, m = matrix.load(pid)
+    m.pop(str(paper_id), None)
+    matrix.save(pid, m)
+    return {"ok": True}
+
+
+@app.get("/api/projects/{pid}/matrix.csv")
+def matrix_csv(pid: int):
+    from fastapi.responses import Response
+    from urllib.parse import quote
+
+    name = quote(f"문헌분석표_{pid}.csv")
+    return Response(matrix.csv_text(pid), media_type="text/csv; charset=utf-8", headers={"Content-Disposition": f"attachment; filename*=UTF-8''{name}"})
+
+
+@app.post("/api/projects/{pid}/gaps")
+def matrix_gaps(pid: int):
+    return {"job": Job("gaps", lambda j: matrix.gaps(pid, j.say, j.stop), llm.engine_for(pid), pid, "gaps").id}
+
+
+@app.post("/api/projects/{pid}/intro")
+def matrix_intro(pid: int):
+    return {"job": Job("intro", lambda j: matrix.intro(pid, j.say, j.stop), llm.engine_for(pid), pid, "intro").id}
 
 
 @app.get("/api/projects/{pid}/ai_usage")

@@ -80,12 +80,15 @@ def chat(prompt, system=None, schema=None, temperature=0.2, num_ctx=8192, model=
 
 
 _embed_ok = None
+_embed_fail_at = 0.0
 
 
 def embed(texts):
-    """문장들을 의미 벡터로. 검색 모델이 없으면 None."""
-    global _embed_ok
-    if _embed_ok is False or not texts:
+    """문장들을 의미 벡터로. 검색 모델이 없으면 None. (꺼져 있으면 1분 뒤 다시 시도)"""
+    global _embed_ok, _embed_fail_at
+    import time
+
+    if not texts or (_embed_ok is False and time.time() - _embed_fail_at < 60):
         return None
     try:
         r = httpx.post(
@@ -99,8 +102,8 @@ def embed(texts):
         v /= np.linalg.norm(v, axis=1, keepdims=True) + 1e-9
         return v
     except Exception:
-        if _embed_ok is None:
-            _embed_ok = False
+        _embed_ok = False
+        _embed_fail_at = time.time()
         return None
 
 

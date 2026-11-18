@@ -162,8 +162,9 @@ function renderProject() {
       <div class="ptitle" title="눌러서 제목 바꾸기">${esc(p.title)}</div>
       <button class="tab" data-tab="plan">① 연구계획</button>
       <button class="tab" data-tab="collect">② 자료수집</button>
-      <button class="tab" data-tab="write">③ 집필</button>
-      <button class="tab" data-tab="review">④ 원고 점검</button>
+      <button class="tab" data-tab="matrix">③ 문헌분석</button>
+      <button class="tab" data-tab="write">④ 집필</button>
+      <button class="tab" data-tab="review">⑤ 원고 점검</button>
       <span class="grow"></span>
       <span class="badge ${p.engine === "claude" ? "" : "gray"}" title="이 프로젝트에서 쓰는 AI">${p.engine === "claude" ? "Claude" : "로컬 AI"}</span>
       <button class="ghost small" id="delProj">삭제</button>
@@ -182,7 +183,7 @@ function renderProject() {
     await api(`/api/projects/${p.id}`, { method: "DELETE" });
     showWelcome();
   };
-  ({ plan: renderPlan, collect: renderCollect, write: renderWrite, review: renderReview })[S.tab]();
+  ({ plan: renderPlan, collect: renderCollect, matrix: renderMatrix, write: renderWrite, review: renderReview })[S.tab]();
 }
 
 // ---------- ① 연구계획 ----------
@@ -336,7 +337,7 @@ function renderPlan() {
     collectJob[p.id] = job;
     S.tab = "collect";
     renderProject();
-    runJob(job, "자료 수집 중", { logEl: "collectLog", onDone: () => { delete collectJob[p.id]; if (S.cur?.id === p.id && S.tab === "collect") renderCollect(); toast("자료 수집 완료 — ③ 집필로 넘어가세요"); } });
+    runJob(job, "자료 수집 중", { logEl: "collectLog", onDone: () => { delete collectJob[p.id]; if (S.cur?.id === p.id && S.tab === "collect") renderCollect(); toast("자료 수집 완료 — ④ 집필로 넘어가세요"); } });
   };
 }
 
@@ -352,7 +353,7 @@ async function renderCollect() {
         <button id="scanBtn">🔍 내 컴퓨터 PDF 찾아 읽기</button>
         <button id="upBtn">＋ PDF 파일 추가</button><input type="file" id="upFile" accept=".pdf" multiple hidden>
         ${p.plan ? `<button id="moreBtn">🌐 인터넷에서 더 수집</button>` : ""}
-        <span class="grow"></span><button class="primary" id="toWrite">③ 집필로 →</button>
+        <span class="grow"></span><button id="toMatrix">③ 문헌분석으로 →</button><button class="primary" id="toWrite">④ 집필로 →</button>
       </div>
       <p class="small muted">검색 폴더: ${esc((S.status?.settings?.scan_folders || []).join(" · "))} (설정에서 변경)</p></div>
     <div class="card"><h3>내 자료 (최근 추가순)</h3><div id="plist" class="muted">불러오는 중…</div></div>
@@ -365,9 +366,129 @@ async function renderCollect() {
     runJob(job, "자료 수집 중", { logEl: "collectLog", onDone: () => { delete collectJob[p.id]; if (S.tab === "collect") renderCollect(); } });
   };
   $("#toWrite").onclick = () => { S.tab = "write"; renderProject(); };
+  $("#toMatrix").onclick = () => { S.tab = "matrix"; renderProject(); };
   const papers = await api("/api/papers");
   $("#plist").innerHTML = paperTable(papers.slice(0, 40));
   bindPaperTable($("#plist"), renderCollect);
+}
+
+// ---------- ③ 문헌분석: 문헌분석표 → 연구 공백 → 서론 초안 ----------
+let matrixJob = {};
+const NONE_TXT = "원문에서 확인 안 됨";
+
+async function renderMatrix() {
+  const p = S.cur;
+  const body = $("#tabBody");
+  if (!body.innerHTML.trim()) body.innerHTML = `<div class="pad"><div class="card muted">불러오는 중…</div></div>`;
+  let d;
+  try { d = await api(`/api/projects/${p.id}/matrix`); } catch (e) { body.innerHTML = `<div class="pad"><div class="card">${esc(e.message)}</div></div>`; return; }
+  if (S.cur?.id !== p.id || S.tab !== "matrix") return;
+  const rep = p.reports || {};
+  const mj = matrixJob[p.id];
+  const num = Object.fromEntries(d.rows.map((r, i) => [r.paper_id, i + 1]));
+  const cite = Object.fromEntries(d.rows.map((r) => [r.paper_id, r.cite]));
+  const sug = d.candidates.filter((c) => c.suggested && !c.done);
+  const refs = (ids) => (ids || []).filter((i) => num[i]).map((i) => `<span class="mx-ref" data-row="${i}">[${num[i]}] ${esc(cite[i])}</span>`).join(" ");
+  const logBox = (kind) => (mj && mj.kind === kind ? `<div class="log" id="mxLog">시작…</div>` : "");
+  const eng = (x) => (x.engine === "claude" ? "Claude" : "로컬 AI");
+
+  const table = d.rows.length ? `<div class="mx-wrap"><table class="mx"><thead><tr><th>#</th><th>논문</th>${d.fields.map(([, t]) => `<th>${esc(t)}</th>`).join("")}<th></th></tr></thead><tbody>
+    ${d.rows.map((r, i) => `<tr id="mxrow-${r.paper_id}"><td>${i + 1}</td><td class="mx-paper"><b>${esc(r.cite)}</b><div class="small muted">${esc(r.title)}</div></td>
+      ${d.fields.map(([k]) => {
+        const f = r.fields[k] || { v: "" };
+        if (f.v === NONE_TXT) return `<td class="mx-none">—</td>`;
+        return f.chunk ? `<td class="mx-ev" data-chunk="${f.chunk}" data-quote="${esc(f.quote)}" title="눌러서 원문 위치 보기">${esc(f.v)}</td>`
+          : `<td class="mx-nochk" title="원문 위치를 확인하지 못한 칸 — 직접 확인해 주세요">${esc(f.v)}</td>`;
+      }).join("")}
+      <td><button class="small ghost" data-del="${r.paper_id}" title="표에서 빼기">✕</button></td></tr>`).join("")}
+    </tbody></table></div>
+    <p class="small muted" style="margin:6px 0 0">칸을 누르면 오른쪽에 원문 위치가 열려요 · 회색 기울임 칸은 원문 위치를 확인하지 못한 내용이라 직접 확인이 필요해요 · — 는 원문에서 찾지 못한 칸</p>`
+    : `<p class="muted small">아직 정리한 논문이 없어요.</p>`;
+
+  const g = rep.gaps;
+  const sev = { 확실: "ok", 보통: "warn", 약함: "need" };
+  const gapsHtml = g ? `<div class="rv-sum">문헌 ${g.n}편 기준 · ${esc(g.ran_at)} · ${eng(g)}</div>
+    ${g.trends.length ? `<div class="small muted" style="margin-top:8px">선행연구의 흐름</div>${g.trends.map((t) => `<div class="rv-item">${esc(t.point)}<div class="small">${refs(t.rows)}</div></div>`).join("")}` : ""}
+    ${g.gaps.length ? `<div class="small muted" style="margin-top:8px">연구 공백</div>${g.gaps.map((x) => `<div class="rv-item ${sev[x.strength] || ""}">
+      <span class="badge rq-${sev[x.strength] || "warn"}">${esc(x.strength)}</span> <b>${esc(x.gap)}</b>
+      <div class="small">📊 근거: ${esc(x.evidence)}</div><div class="small">${refs(x.rows)}</div>
+      ${x.check ? `<div class="small muted">🔍 주장하기 전에 확인: ${esc(x.check)}</div>` : ""}</div>`).join("")}` : ""}
+    ${g.assumptions.length ? `<div class="small muted" style="margin-top:8px">선행연구가 깔고 있는 이론적 가정과 비판</div>${g.assumptions.map((x) => `<div class="rv-item warn"><b>가정:</b> ${esc(x.assumption)}<div class="small"><b>비판:</b> ${esc(x.critique)}</div><div class="small">${refs(x.rows)}</div></div>`).join("")}` : ""}
+    ${g.questions.length ? `<div class="small muted" style="margin-top:8px">연구문제 후보</div>${g.questions.map((q) => `<div class="rv-item">❓ ${esc(q)}</div>`).join("")}` : ""}
+    ${g.n < 10 ? `<p class="small" style="color:var(--warn)">표의 논문이 ${g.n}편이라 공백 판단이 약할 수 있어요. 관련 논문을 더 정리할수록 정확해져요.</p>` : ""}` : "";
+
+  const it = rep.intro;
+  body.innerHTML = `<div class="pad">
+    <div class="card"><h3>📚 문헌분석표</h3>
+      <p class="small muted">선행연구마다 목적·대상·변인·측정도구·분석 방법·결과·한계를 정리해요. 모든 칸에 원문 근거가 달려 있어요. (한 편에 Claude 20~30초, 로컬 AI 1~2분)</p>
+      <div class="row"><button class="primary" id="mxPick" ${mj ? "disabled" : ""}>＋ 논문 골라 정리하기</button>
+        ${sug.length ? `<button id="mxSug" ${mj ? "disabled" : ""}>원고에 인용된 논문 ${sug.length}편 한꺼번에 정리</button>` : ""}
+        <span class="grow"></span>${d.rows.length ? `<a class="btnlink ghostlink" href="/api/projects/${p.id}/matrix.csv">⬇ 엑셀로 내려받기 (CSV)</a>` : ""}</div>
+      ${logBox("matrix")}
+      <div id="mxPicker" class="mx-picker" style="display:none"></div>
+      ${table}</div>
+    <div class="card"><div class="row"><h3 class="grow">🔎 연구 동향 · 공백 검증</h3>
+        <button class="primary" id="mxGap" ${d.rows.length >= 3 && !mj ? "" : "disabled"}>연구 공백 찾기</button></div>
+      <p class="small muted" style="margin:2px 0 8px">표에 정리한 논문만 근거로 선행연구의 흐름, 연구 공백(몇 편 중 몇 편인지 숫자로), 선행연구가 깔고 있는 이론적 가정과 그 비판, 연구문제 후보를 정리해요. (3편 이상 필요)</p>
+      ${logBox("gaps")}${gapsHtml}</div>
+    <div class="card"><div class="row"><h3 class="grow">✍ 서론 초안</h3>
+        <button class="primary" id="mxIntro" ${g && !mj ? "" : "disabled"}>서론 초안 쓰기</button></div>
+      <p class="small muted" style="margin:2px 0 8px">연구의 필요성 → 선행연구의 흐름 → 연구 공백 → 연구 목적·연구문제 순서로 써요. 문장마다 표의 논문 원문에서 근거를 찾아 연결하고, 못 찾으면 '?'를 달아요. AI 초안이라 원고에서 보라색으로 표시돼요.</p>
+      ${logBox("intro")}
+      ${it ? `<div class="rv-sum">근거 확인 ${it.ok}문장 · 확인 필요(?) ${it.need}문장 · ${esc(it.ran_at)} · ${eng(it)}</div>
+        <div class="paper intro-prev">${it.html}</div>
+        <div class="row" style="margin-top:8px"><button class="primary" id="mxIns">④ 집필 원고 맨 앞에 넣기</button><button id="mxInsEnd">맨 뒤에 넣기</button></div>` : ""}</div>
+  </div>`;
+
+  const go = (kind, url, json, title) => async () => {
+    const { job } = await api(url, json ? { json } : { method: "POST" });
+    matrixJob[p.id] = { job, kind };
+    renderMatrix();
+    runJob(job, title, {
+      logEl: "mxLog",
+      onDone: async (r, j) => {
+        delete matrixJob[p.id];
+        if (S.cur?.id === p.id) { S.cur = await api(`/api/projects/${p.id}`); if (S.tab === "matrix") renderMatrix(); }
+        if (j.status === "done") toast(`${title} 완료`);
+      },
+    });
+  };
+  $("#mxPick").onclick = () => {
+    const box = $("#mxPicker");
+    if (box.style.display === "block") { box.style.display = "none"; return; }
+    box.style.display = "block";
+    box.innerHTML = `<input id="mxFilter" placeholder="제목·저자로 찾기"><div class="mx-list">${d.candidates.map((c) => `<label class="chk mx-cand" data-q="${esc((c.cite + " " + c.title).toLowerCase())}">
+        <input type="checkbox" value="${c.id}" ${c.suggested && !c.done ? "checked" : ""}> <b>${esc(c.cite)}</b> ${esc(c.title)}
+        ${c.done ? `<span class="badge gray">정리됨</span>` : ""}${c.suggested ? `<span class="badge">원고에 인용</span>` : ""}</label>`).join("")}</div>
+      <div class="row"><button class="primary" id="mxGo">고른 논문 정리 시작</button><span class="small muted" id="mxCnt"></span></div>`;
+    const cnt = () => ($("#mxCnt").textContent = `${$$(".mx-list input:checked", box).length}편 선택`);
+    cnt();
+    $$(".mx-list input", box).forEach((x) => (x.onchange = cnt));
+    $("#mxFilter").oninput = (e) => { const q = e.target.value.toLowerCase(); $$(".mx-cand", box).forEach((l) => (l.style.display = l.dataset.q.includes(q) ? "" : "none")); };
+    $("#mxGo").onclick = () => {
+      const ids = $$(".mx-list input:checked", box).map((x) => +x.value);
+      if (!ids.length) return toast("정리할 논문을 골라주세요");
+      go("matrix", `/api/projects/${p.id}/matrix`, { paper_ids: ids }, "문헌분석표 만들기")();
+    };
+  };
+  if ($("#mxSug")) $("#mxSug").onclick = go("matrix", `/api/projects/${p.id}/matrix`, { paper_ids: sug.map((c) => c.id) }, "문헌분석표 만들기");
+  $("#mxGap").onclick = go("gaps", `/api/projects/${p.id}/gaps`, null, "연구 공백 찾기");
+  $("#mxIntro").onclick = go("intro", `/api/projects/${p.id}/intro`, null, "서론 초안 쓰기");
+  $$(".mx-ev", body).forEach((td) => (td.onclick = () => showEvidence({ chunk: td.dataset.chunk, quote: td.dataset.quote })));
+  $$("[data-del]", body).forEach((b) => (b.onclick = async () => { await api(`/api/projects/${p.id}/matrix/${b.dataset.del}`, { method: "DELETE" }); renderMatrix(); }));
+  $$(".mx-ref", body).forEach((x) => (x.onclick = () => {
+    const tr = $(`#mxrow-${x.dataset.row}`);
+    if (tr) { tr.scrollIntoView({ block: "center", behavior: "smooth" }); tr.classList.add("flash"); setTimeout(() => tr.classList.remove("flash"), 1600); }
+  }));
+  $$(".intro-prev .cite[data-chunk]", body).forEach((c) => (c.onclick = () => showEvidence(c)));
+  const insert = (front) => async () => {
+    const cur = await api(`/api/projects/${p.id}`);
+    const content = front ? it.html + (cur.content || "") : (cur.content || "") + it.html;
+    await api(`/api/projects/${p.id}`, { method: "PUT", json: { content } });
+    S.cur = await api(`/api/projects/${p.id}`);
+    toast("서론 초안을 원고에 넣었어요 — ④ 집필에서 다듬어 주세요");
+  };
+  if (it) { $("#mxIns").onclick = insert(true); $("#mxInsEnd").onclick = insert(false); }
 }
 
 function bindAddButtons(after) {
@@ -442,7 +563,7 @@ function formDialog(title, fields, okText = "저장") {
   });
 }
 
-// ---------- ③ 집필 ----------
+// ---------- ④ 집필 ----------
 let editor = null, margin = null, saveT = null, detectT = null, composing = false, openCite = null;
 const citeMsg = new WeakMap();
 
@@ -538,7 +659,7 @@ function normalizeCites() {
     c.contentEditable = "false";
     c.classList.toggle("need", !c.dataset.chunk);
   });
-  if (S.focusCid) {  // ④ 원고 점검 결과에서 누른 인용으로 이동
+  if (S.focusCid) {  // ⑤ 원고 점검 결과에서 누른 인용으로 이동
     const c = $(`.cite[data-cid="${S.focusCid}"]`, editor);
     S.focusCid = null;
     if (c) requestAnimationFrame(() => { c.scrollIntoView({ block: "center", behavior: "smooth" }); toggleMemo(c, true); if (c.dataset.chunk) showEvidence(c); });
@@ -925,7 +1046,7 @@ async function renderReview() {
     <div class="card"><h3>① 원고 불러오기</h3>
       <p class="small muted">${has ? "원고가 들어 있어요. 다른 파일로 바꾸려면 다시 불러오세요 (지금 원고는 덮어써져요)." : "이미 쓴 원고(.docx, .hwpx, .txt)를 올리거나 글을 붙여넣으세요. 원고 속 (저자, 연도)·저자(연도)는 자동으로 인용으로 인식돼요."}</p>
       <div class="row"><button id="impFile">📄 파일 선택</button><input type="file" id="impInput" accept=".docx,.hwpx,.txt,.md,.hwp" hidden>
-        <button id="impPasteBtn">📋 글 붙여넣기</button>${has ? `<button id="goWrite">③ 집필 화면에서 원고 보기 →</button>` : ""}</div>
+        <button id="impPasteBtn">📋 글 붙여넣기</button>${has ? `<button id="goWrite">④ 집필 화면에서 원고 보기 →</button>` : ""}</div>
       <div id="impPaste" style="display:none;margin-top:8px"><textarea id="impText" rows="7" placeholder="여기에 원고를 붙여넣으세요. 장 제목(I. 서론, 1. 연구의 필요성 등)은 자동으로 제목이 돼요."></textarea>
         <button class="primary" id="impPasteGo" style="margin-top:6px">불러오기</button></div>
     </div>
@@ -991,7 +1112,7 @@ async function renderReview() {
     S.cur = await api(`/api/projects/${p.id}`);
     b.textContent = "넣었어요 ✓";
     b.disabled = true;
-    toast("논의 장 끝에 문장을 넣었어요 — ③ 집필에서 다듬어 주세요");
+    toast("논의 장 끝에 문장을 넣었어요 — ④ 집필에서 다듬어 주세요");
   }));
   $$("[data-get]", body).forEach((b) => (b.onclick = async () => {
     const w = p.reports.recent.data[+b.dataset.get];
@@ -1006,7 +1127,7 @@ async function loadAiUse(p) {
   let u;
   try { u = await api(`/api/projects/${p.id}/ai_usage`); } catch { el.textContent = "기록을 불러오지 못했어요"; return; }
   const eng = (r) => r.engine === "claude" ? "Claude" : r.engine === "local" ? "로컬 AI" : "—";
-  const warn = u.drafts ? `<div class="rv-item warn"><b class="st">⚠</b> 아직 <b>AI 초안 그대로인 문단이 ${u.drafts}개</b> 있어요. ③ 집필에서 보라색 문단을 내 말로 고쳐 쓰거나, 공개 문구에 초안 작성 사실을 밝혀 주세요.</div>` : "";
+  const warn = u.drafts ? `<div class="rv-item warn"><b class="st">⚠</b> 아직 <b>AI 초안 그대로인 문단이 ${u.drafts}개</b> 있어요. ④ 집필에서 보라색 문단을 내 말로 고쳐 쓰거나, 공개 문구에 초안 작성 사실을 밝혀 주세요.</div>` : "";
   if (!u.rows.length) { el.innerHTML = warn + "아직 이 원고에서 AI 기능을 쓴 기록이 없어요."; return; }
   const box = (id, t, v) => `<div class="small muted" style="margin-top:10px">${t}</div>
     <textarea id="${id}" rows="4" style="width:100%">${esc(v)}</textarea><button class="small" data-copy="${id}">📋 복사</button>`;
@@ -1365,7 +1486,7 @@ async function renderSettings() {
   $("#nightNow").onclick = async () => {
     if (!confirm("대기 중인 새벽 예약을 지금 바로 로컬 AI로 실행할까요? (컴퓨터가 느려질 수 있어요)")) return;
     await api("/api/night/run_now", { method: "POST" });
-    toast("예약 작업을 시작했어요. 각 프로젝트의 ④ 원고 점검 탭에서 상태를 볼 수 있어요.", 5000);
+    toast("예약 작업을 시작했어요. 각 프로젝트의 ⑤ 원고 점검 탭에서 상태를 볼 수 있어요.", 5000);
   };
   $("#saveSet").onclick = async () => {
     const c = collect();
