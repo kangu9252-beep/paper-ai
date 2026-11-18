@@ -373,13 +373,16 @@ def scan(d: dict = Body(default={})):
         return {"job": running.id, "queued": True}
 
     def fn(j):
-        pdfindex.scan_folders(only or db.get_settings()["scan_folders"], log=j.say, stop=j.stop)
+        done = list(only or db.get_settings()["scan_folders"])
+        pdfindex.scan_folders(done, log=j.say, stop=j.stop)
         while SCAN_QUEUE and not j.stop():
             j.say("이어서 새로 고른 폴더를 읽어요")
-            pdfindex.scan_folders(SCAN_QUEUE.pop(0), log=j.say, stop=j.stop)
+            nxt = SCAN_QUEUE.pop(0)
+            done += nxt
+            pdfindex.scan_folders(nxt, log=j.say, stop=j.stop)
         SCAN_QUEUE.clear()
-        j.say("PDF 읽기 끝 — 이제 근거 찾기가 돼요. 이어서 의미 검색을 준비해요(오래 걸리면 중지해도 돼요)")
-        pdfindex.embed_missing(log=j.say, stop=j.stop)
+        j.say("PDF 읽기 끝 — 이제 근거 찾기가 돼요. 이어서 고른 폴더의 의미 검색을 준비해요(오래 걸리면 중지해도 돼요)")
+        pdfindex.embed_missing(log=j.say, stop=j.stop, folders=done)
         j.say("완료")
 
     eng = llm.engine_for(None) if db.get_settings().get("scan_with_claude") else "local"  # 기본은 무료인 로컬 AI

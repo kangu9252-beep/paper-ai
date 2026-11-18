@@ -331,9 +331,14 @@ def scan_folders(folders, log=print, stop=lambda: False):
     return len(todo)
 
 
-def embed_missing(log=print, stop=lambda: False):
-    rows = db.q("SELECT id, text FROM chunks WHERE emb IS NULL")
+def embed_missing(log=print, stop=lambda: False, folders=None):
+    """folders를 주면 그 폴더 안 PDF의 조각만 준비한다(내 자료 전체를 다 하지 않음)."""
+    rows = db.q("SELECT c.id, c.text, p.path FROM chunks c JOIN papers p ON p.id = c.paper_id WHERE c.emb IS NULL")
+    if folders:
+        roots = [os.path.normcase(os.path.abspath(f)).rstrip("\\/") + os.sep for f in folders]
+        rows = [r for r in rows if any(os.path.normcase(r["path"]).startswith(x) for x in roots)]
     if not rows:
+        log("의미 검색 준비: 고른 폴더는 이미 다 준비돼 있어요")
         return
     llm.reset_embed_check()
     log(f"의미 검색 준비: 조각 {len(rows)}개 (그동안에도 낱말 검색으로는 찾을 수 있어요)")
