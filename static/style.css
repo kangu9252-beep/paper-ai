@@ -339,3 +339,21 @@ ol.g-steps li.c { border-color: #c98a00; background: var(--accent-soft); border-
 .cm .chips { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 6px; }
 .ch-in { display: flex; gap: 6px; padding: 10px; border-top: 1px solid var(--line); }
 .ch-in textarea { flex: 1; resize: none; font-size: 14px; }
+
+/* 📁 폴더 고르기 */
+dialog.fpick { width: 640px; max-width: calc(100vw - 32px); }
+.fp-sel { display: flex; flex-wrap: wrap; gap: 6px; }
+.fp-chip { font-size: 12px; background: var(--accent-soft); border: 1px solid var(--accent); color: var(--text); border-radius: 99px; padding: 2px 10px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fp-chip b { margin-left: 6px; cursor: pointer; color: var(--muted); }
+.fp-nav { display: flex; align-items: center; gap: 8px; margin: 10px 0 6px; }
+.fp-path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fp-list { max-height: 340px; overflow-y: auto; border: 1px solid var(--line); border-radius: 8px; padding: 4px 8px; }
+.fp-item { display: flex; align-items: center; gap: 8px; padding: 5px 0; border-bottom: 1px solid var(--line); font-size: 14px; }
+.fp-item:last-child { border-bottom: none; }
+.fp-open { cursor: pointer; }
+.fp-open:hover { color: var(--accent); }
+.fp-item input[type="checkbox"] { width: auto; flex: 0 0 auto; margin: 0; }
+.fp-item .fp-open { flex: 1; min-width: 0; text-align: left; }
+.fp-item > .grow { display: none; }
+.fp-item button { flex: 0 0 auto; white-space: nowrap; }
+.fp-item .small { white-space: nowrap; }

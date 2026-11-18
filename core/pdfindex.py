@@ -141,10 +141,40 @@ NOTE_RE = re.compile(r"α|문항|\d점|공개본|번안|원척도|척도\s*원�
 SKIP_NAME_RE = re.compile(r"카피킬러|결과확인서|수업계획서|랩미팅|제출용|문헌분석표|참고문헌\s*정리|중간고사|기말|초안|^20\d{6}[\s_]")
 
 
+# '제목 (유다미·안도희, 2015)' — 제목 뒤 괄호에 저자, 연도
+NAME_TAIL_RE = re.compile(r"^(?P<t>.{6,}?)\s*\(\s*(?P<a>[가-힣A-Za-z][^()]{0,60}?)\s*,\s*(?P<y>(?:19|20)\d{2})[a-z]?\s*\)\s*$")
+# 'Granqvist_2017_혼란애착리뷰' / '국내_안하얀서영석_2018_정서학대…' — 저자_연도_제목
+NAME_US_RE = re.compile(r"^(?:국내_|해외_)?(?P<a>[가-힣A-Za-z][가-힣A-Za-z_\-]{1,60}?)_(?P<y>(?:19|20)\d{2})[a-z]?_(?P<t>.+)$")
+
+
+# 내 원고·IRB·백업 폴더 (근거 자료가 아님): 구글 드라이브의 '다른 컴퓨터'는 PC 백업이라 중복
+SKIP_DIR_RE = re.compile(r"^다른 컴퓨터$|^Other computers$|IRB|현재 원고|투고 준비|이전 버전")
+
+
+def find_gdrive():
+    """구글 드라이브(데스크톱 앱) 폴더를 찾는다. 없으면 ''."""
+    import string
+
+    for d in string.ascii_uppercase[3:]:
+        for name in ("내 드라이브", "My Drive"):
+            p = f"{d}:\\{name}"
+            try:
+                if os.path.isdir(p):
+                    return p
+            except OSError:
+                pass
+    return ""
+
+
 def meta_from_name(path):
     """'02 김미량·김재운 외(2010) 진지한 여가척도….pdf' 처럼 파일 이름에 저자(연도) 제목이 있으면 그대로 쓴다."""
-    m = NAME_RE.match(Path(path).stem.strip())
+    stem = re.sub(r"\s*\(\d\)$", "", Path(path).stem.strip())  # '(1)' 같은 복사본 번호
+    m = NAME_RE.match(stem) or NAME_TAIL_RE.match(stem)
     if not m:
+        m = NAME_US_RE.match(stem)
+        if m:
+            authors = [a for a in m.group("a").split("_") if a]
+            return {"title": m.group("t").replace("_", " ").strip(), "authors": authors[:10], "year": m.group("y"), "doi": "", "note_title": True}
         return None
     raw = re.sub(r"\s*(외|등|et\s*al\.?)\s*$", "", m.group("a").strip(" ,_-"))
     authors = [a.strip() for a in re.split(r"\s*(?:·|,|&|\band\b)\s*", raw) if a.strip()]
@@ -165,7 +195,7 @@ def guess_meta(path, chunks):
         if meta:
             return meta
     named = meta_from_name(path)
-    if named and not NOTE_RE.search(named["title"]):  # 파일 이름이 정보를 주면 AI에게 묻지 않음 (빠르고 정확)
+    if named and not NOTE_RE.search(named["title"]) and not named.get("note_title"):  # 파일 이름이 정보를 주면 AI에게 묻지 않음 (빠르고 정확)
         return named
     head = " ".join(c["text"] for c in chunks if c["page"] == 0)[:2000]
     if len(head) > 100:
@@ -260,7 +290,7 @@ def scan_folders(folders, log=print, stop=lambda: False):
         if not os.path.isdir(f):
             continue
         for dirpath, dirnames, files in os.walk(f):
-            dirnames[:] = [d for d in dirnames if not d.startswith(".") and d not in ("node_modules", "AppData", ".venv")]
+            dirnames[:] = [d for d in dirnames if not d.startswith((".", "$")) and d not in ("node_modules", "AppData", ".venv") and not SKIP_DIR_RE.search(d)]
             for fn in files:
                 if fn.lower().endswith(".pdf") and not is_own_draft(fn, mine):
                     p = os.path.join(dirpath, fn)
@@ -274,8 +304,8 @@ def scan_folders(folders, log=print, stop=lambda: False):
     retry = {r["path"] for r in db.q("SELECT path FROM papers WHERE status='notext'")}  # 스캔본 → 글자 인식으로 다시
     todo = [p for p in found if p not in known or p in retry or abs(known[p] - os.path.getmtime(p)) >= 1]
     # 파일 이름에 저자(연도)가 있는 논문 먼저 (AI 없이 빨리 읽힘) → 바로 검색되게 한 뒤 나머지
-    quick = lambda p: (m := meta_from_name(p)) is not None and not NOTE_RE.search(m["title"])
-    todo.sort(key=lambda p: not quick(p))
+    quick = lambda p: (m := meta_from_name(p)) is not None and not NOTE_RE.search(m["title"]) and not m.get("note_title")
+    todo.sort(key=lambda p: (not quick(p), not re.search(r"학위논문|참고문헌|척도|논문", p)))  # 논문 폴더 먼저
     n_quick = sum(1 for p in todo if quick(p))
     log(f"PDF {len(found)}개 발견, 새로 읽을 것 {len(todo)}개 (이름에 저자·연도가 있는 {n_quick}개 먼저)")
     for i, p in enumerate(todo):
@@ -351,7 +381,32 @@ def tokens(text):
 STOP = set("the and for with that this from are was were have has been which their there these those into than also such using use used study research 연구 대한 있다 있는 통해 위해 따라 그리고 하지만 또한 이러한 것으로 것이 대해".split())
 
 
+# ---------- 논문(프로젝트)별 참조 폴더: 정해 두면 그 폴더 안의 PDF에서만 근거를 찾는다 ----------
+_scope = threading.local()
+
+
+def set_scope(folders):
+    _scope.folders = [os.path.normcase(os.path.normpath(f)) for f in (folders or []) if f]
+
+
+def scope_ids():
+    """참조 폴더 안의 논문 id 목록. 폴더를 정하지 않았으면 None(전체)."""
+    fs = getattr(_scope, "folders", None)
+    if not fs:
+        return None
+    out = []
+    for r in db.q("SELECT id, path FROM papers WHERE status='ok'"):
+        p = os.path.normcase(os.path.normpath(r["path"]))
+        if any(p.startswith(f + os.sep) for f in fs):
+            out.append(r["id"])
+    return out
+
+
 def search(query, k=10, paper_ids=None, per_paper=3):
+    if paper_ids is None:
+        paper_ids = scope_ids()
+        if paper_ids is not None and not paper_ids:
+            return []  # 참조 폴더에 읽힌 논문이 아직 없음
     where, args = "", []
     if paper_ids:
         where = f" AND paper_id IN ({','.join('?' * len(paper_ids))})"
@@ -437,7 +492,11 @@ def find_papers_by_cite(author, year):
     author = re.sub(r"\s*(외|et al\.?|등)\s*$", "", author.strip())
     first = re.split(r"\s*(?:,|&|and|·)\s*", author)[0].strip()
     out = []
+    allowed = scope_ids()
+    allowed = set(allowed) if allowed is not None else None
     for p in db.q("SELECT id, title, authors, year, path FROM papers WHERE status='ok'"):
+        if allowed is not None and p["id"] not in allowed:
+            continue
         if year and p["year"] and p["year"][:4] != year[:4]:
             continue
         if year and not p["year"] and year[:4] not in Path(p["path"]).stem:  # 연도를 모르는 논문은 파일 이름의 연도라도 맞아야

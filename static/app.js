@@ -217,7 +217,7 @@ const GUIDE = {
   ] },
   draft: { name: "✍ 초안이 있어요", sub: "어느 정도 썼어요", steps: [
     { t: "원고 불러오기", why: "한글(.hwpx)·워드(.docx) 원고를 올리면 (저자, 연도) 인용을 자동으로 알아봐요.", tab: "review", a: "#impFile", done: (p) => txtLen(p) > 500 },
-    { t: "내 논문 PDF 연결하기", why: "인용한 논문 원문이 있는 폴더(외장하드 포함)를 읽어 들여야 근거를 찾을 수 있어요.", tab: "collect", a: "#scanBtn", done: () => (S.status?.papers || 0) >= 10 },
+    { t: "참조할 논문 폴더 고르기", why: "인용한 논문 원문이 있는 폴더(외장하드·구글 드라이브 포함)를 고르면 그 안에서만 근거를 찾아요.", tab: "collect", a: "#refFolders", done: (p) => (p.ref_papers || 0) >= 5 },
     { t: "출처 확인하기", why: "원고 속 인용이 원문과 맞는지, 근거 없이 주장한 문장은 없는지 확인해요.", tab: "write", a: "#autoAll", done: (p) => has(p, "cites") || has(p, "uncited") },
     { t: "선행연구 보강하기", why: "문헌분석표로 선행연구를 정리하고, 최신 연구와 연구 공백을 확인해 서론·이론적 배경을 단단하게 해요.", tab: "matrix", a: "#mxPick", done: (p) => mxCount(p) >= 5 || has(p, "recent") },
     { t: "논문의 줄기 점검", why: "연구문제→선행연구→방법→결과→결론이 한 줄기인지 예비심사 리뷰로 봐요.", tab: "review", a: "#tool-structure", done: (p) => has(p, "structure") },
@@ -514,10 +514,26 @@ async function renderCollect() {
         ${p.plan ? `<button id="moreBtn">🌐 인터넷에서 더 수집</button>` : ""}
         <span class="grow"></span><button id="toMatrix">③ 문헌분석으로 →</button><button class="primary" id="toWrite">④ 집필로 →</button>
       </div>
-      <p class="small muted">검색 폴더: ${esc((S.status?.settings?.scan_folders || []).join(" · "))} (설정에서 변경)</p></div>
+      <p class="small muted">내 자료 폴더: ${esc((S.status?.settings?.scan_folders || []).join(" · "))} (설정에서 변경)</p></div>
+    <div class="card" id="refFolders"><div class="row"><h3 class="grow">📁 이 논문이 참조할 폴더</h3><button class="primary" id="refPick">폴더 고르기</button></div>
+      <p class="small muted" style="margin:2px 0 8px">정해 두면 이 논문의 근거 찾기·문헌분석·집필이 <b>고른 폴더 안의 PDF에서만</b> 이뤄져요. 다른 과목 자료가 섞이지 않아 더 빠르고 정확해요.</p>
+      ${(p.ref_folders || []).length ? `<div class="fp-sel">${p.ref_folders.map((f) => `<span class="fp-chip" title="${esc(f)}">📁 ${esc(f)}</span>`).join("")}</div>
+        <div class="small muted" style="margin-top:6px">이 폴더들에서 읽힌 논문 <b>${p.ref_papers ?? 0}편</b></div>` : `<div class="small muted">지정 안 함 — 내 자료 전체(${S.status?.papers || 0}편)에서 찾아요</div>`}</div>
+    ${S.status?.gdrive ? `<div class="card gd-card"><div class="row"><div class="grow"><b>☁ 구글 드라이브에도 논문이 있나요?</b>
+      <div class="small muted">이 컴퓨터에 연결된 구글 드라이브(${esc(S.status.gdrive)})를 찾았어요. 추가하면 드라이브 속 PDF에서도 근거를 찾아요. ('다른 컴퓨터' 백업과 원고·IRB 폴더는 빼고 읽어요)</div></div>
+      <button class="primary" id="gdAdd">추가하고 읽기</button></div></div>` : ""}
     <div class="card"><h3>내 자료 (최근 추가순)</h3><div id="plist" class="muted">불러오는 중…</div></div>
   </div>`;
   bindAddButtons(() => renderCollect());
+  $("#refPick").onclick = () => chooseRefFolders(() => { if (S.tab === "collect") renderCollect(); });
+  if ($("#gdAdd")) $("#gdAdd").onclick = async () => {
+    const f = S.status.settings.scan_folders || [];
+    await api("/api/settings", { json: { scan_folders: [f[0], S.status.gdrive, ...f.slice(1)].filter(Boolean) } });
+    await refreshStatus();
+    const { job } = await api("/api/scan", { method: "POST" });
+    renderCollect();
+    runJob(job, "구글 드라이브 PDF 읽는 중", { onDone: () => renderCollect() });
+  };
   if ($("#moreBtn")) $("#moreBtn").onclick = async () => {
     const { job } = await api(`/api/projects/${p.id}/collect`, { json: { route: p.route || 0 } });
     collectJob[p.id] = job;
@@ -848,6 +864,72 @@ function modelSvg(m) {
     <text x="16" y="${m.moderators?.length ? H + 8 : 26}" font-size="14" font-weight="700">${X(m.title || "연구모형")}</text>
     ${svgLines}${boxes.join("")}
     <text x="${W2 - 16}" y="${H + 8}" text-anchor="end" font-size="11" fill="#555">${X(foot)}</text></svg>`;
+}
+
+// ---------- 📁 폴더 고르기 창 (탐색기처럼 펼쳐 보며 체크) ----------
+function folderPicker({ title, hint, selected = [], onSave }) {
+  const sel = [...selected];
+  const d = document.createElement("dialog");
+  d.className = "wizard fpick";
+  document.body.appendChild(d);
+  let cur = "";
+  const chips = () => sel.length ? sel.map((f, i) => `<span class="fp-chip" title="${esc(f)}">📁 ${esc(f.split(/[\\/]/).filter(Boolean).slice(-2).join(" › "))}<b data-rm="${i}">✕</b></span>`).join("") : `<span class="small muted">아직 고른 폴더가 없어요</span>`;
+  const draw = async () => {
+    d.innerHTML = `<h3 style="margin:0 0 4px">${esc(title)}</h3><p class="small muted" style="margin:0 0 8px">${esc(hint || "")}</p>
+      <div class="fp-sel">${chips()}</div>
+      <div class="fp-nav"><button class="small" id="fpUp" ${cur ? "" : "disabled"}>⬆ 위로</button><span class="small muted fp-path">${esc(cur || "내 컴퓨터")}</span></div>
+      <div class="fp-list"><div class="small muted"><span class="spin"></span> 폴더를 살펴보는 중…</div></div>
+      <div class="row" style="justify-content:flex-end;margin-top:10px"><button class="ghost" id="fpCancel">취소</button><button class="primary" id="fpSave">이 폴더들로 정하기 (${sel.length})</button></div>`;
+    $$("[data-rm]", d).forEach((b) => (b.onclick = () => { sel.splice(+b.dataset.rm, 1); draw(); }));
+    $("#fpCancel", d).onclick = () => { d.close(); d.remove(); };
+    $("#fpSave", d).onclick = () => { d.close(); d.remove(); onSave(sel); };
+    let r;
+    try { r = await api(`/api/fs?path=${encodeURIComponent(cur)}`); } catch (e) { $(".fp-list", d).innerHTML = `<div class="small" style="color:var(--warn)">${esc(e.message)}</div>`; return; }
+    $("#fpUp", d).onclick = () => { cur = r.parent || ""; draw(); };
+    const icon = (x) => (x.kind === "drive" ? "💽" : x.kind === "shortcut" ? (x.name === "구글 드라이브" ? "☁" : "⭐") : "📁");
+    $(".fp-list", d).innerHTML = (r.items.length ? r.items.map((x, i) => `<div class="fp-item">
+        ${x.kind === "dir" ? `<input type="checkbox" data-pick="${i}" ${sel.includes(x.path) ? "checked" : ""}>` : `<span style="width:16px"></span>`}
+        <span class="fp-open" data-open="${i}">${icon(x)} ${esc(x.name)}</span>
+        ${x.kind === "dir" ? `<span class="small muted">${x.pdfs ? `PDF ${x.pdfs}${x.more ? "+" : ""}개` : "PDF 없음"}</span>` : ""}
+        <span class="grow"></span><button class="small ghost" data-open="${i}">열기 ›</button></div>`).join("") : `<div class="small muted">하위 폴더가 없어요</div>`)
+      + (r.direct_pdfs ? `<div class="small muted" style="margin-top:6px">이 폴더 바로 안에 PDF ${r.direct_pdfs}개 — <a href="#" id="fpHere">이 폴더 고르기</a></div>` : "");
+    $$("[data-open]", d).forEach((b) => (b.onclick = () => { cur = r.items[+b.dataset.open].path; draw(); }));
+    $$("[data-pick]", d).forEach((b) => (b.onchange = () => {
+      const pth = r.items[+b.dataset.pick].path;
+      const i = sel.indexOf(pth);
+      if (b.checked && i < 0) sel.push(pth);
+      if (!b.checked && i >= 0) sel.splice(i, 1);
+      $(".fp-sel", d).innerHTML = chips();
+      $("#fpSave", d).textContent = `이 폴더들로 정하기 (${sel.length})`;
+      $$("[data-rm]", d).forEach((x) => (x.onclick = () => { sel.splice(+x.dataset.rm, 1); draw(); }));
+    }));
+    if ($("#fpHere", d)) $("#fpHere", d).onclick = (e) => { e.preventDefault(); if (!sel.includes(cur)) sel.push(cur); draw(); };
+  };
+  d.showModal();
+  draw();
+}
+
+// 이 논문의 참조 폴더 정하기 → 내 자료 폴더에도 넣고 그 폴더만 읽기
+async function chooseRefFolders(after) {
+  const p = S.cur;
+  folderPicker({
+    title: "📁 이 논문이 참조할 폴더",
+    hint: "고른 폴더 안의 PDF에서만 근거를 찾아요. 하위 폴더까지 함께 읽어요. 비워 두면 내 자료 전체에서 찾아요.",
+    selected: p.ref_folders || [],
+    onSave: async (sel) => {
+      await api(`/api/projects/${p.id}`, { method: "PUT", json: { ref_folders: sel } });
+      const all = S.status?.settings?.scan_folders || [];
+      const add = sel.filter((f) => !all.includes(f));
+      if (add.length) { await api("/api/settings", { json: { scan_folders: [...all, ...add] } }); await refreshStatus(); }
+      S.cur = await api(`/api/projects/${p.id}`);
+      if (sel.length) {
+        const { job } = await api("/api/scan", { json: { folders: sel } });
+        toast("고른 폴더의 PDF를 읽기 시작했어요");
+        runJob(job, "참조 폴더 PDF 읽는 중", { onDone: async () => { S.cur = await api(`/api/projects/${p.id}`); after && after(); } });
+      }
+      after && after();
+    },
+  });
 }
 
 function bindAddButtons(after) {
@@ -1678,7 +1760,7 @@ async function showFinder(c) {
   const search = async () => {
     const only = $("#fonly", body)?.checked;
     const q = encodeURIComponent($("#fq", body).value);
-    const r = await api(`/api/search?q=${q}${only ? `&author=${encodeURIComponent(author)}&year=${year}` : ""}`);
+    const r = await api(`/api/search?q=${q}${only ? `&author=${encodeURIComponent(author)}&year=${year}` : ""}&project_id=${S.cur?.id || 0}`);
     $("#fres", body).innerHTML = r.results.length
       ? r.results.map((x, i) => `<div class="result" data-i="${i}"><span class="c">${esc(x.cite)}</span> <span class="t">${esc(x.title)} · p.${x.page + 1}</span><div class="s">${esc(x.text)}</div></div>`).join("")
       : `<p>결과가 없어요. 다른 말로 검색하거나 PDF를 추가해 보세요.</p>`;
@@ -1864,6 +1946,7 @@ async function renderSettings() {
     </div>
     <div class="card"><h3>내 컴퓨터에서 PDF를 찾을 폴더</h3>
       <textarea id="scan_folders" rows="4">${esc(s.scan_folders.join("\n"))}</textarea>
+      <div class="row" style="margin-top:6px"><button id="scanPick">📁 폴더 고르기</button></div>
       <p class="small muted">한 줄에 폴더 하나. '내 컴퓨터 PDF 찾아 읽기'와 근거 자동찾기가 이 폴더들을 봅니다.</p>
       <label class="field"><span>한 번에 내려받을 최대 논문 수</span><input id="max_downloads" type="number" min="1" max="60" value="${s.max_downloads}"></label>
     </div>
@@ -1887,6 +1970,11 @@ async function renderSettings() {
     engine: $('input[name="engine"]:checked').value, claude_key: $("#claude_key").value,
   });
   $("#claudeWiz").onclick = () => claudeWizard(renderSettings);
+  $("#scanPick").onclick = () => folderPicker({
+    title: "📁 내 자료 폴더", hint: "PDF를 찾아 읽을 폴더를 고르세요. 하위 폴더까지 함께 읽어요.",
+    selected: $("#scan_folders").value.split("\n").map((x) => x.trim()).filter(Boolean),
+    onSave: (sel) => { $("#scan_folders").value = sel.join("\n"); toast("아래 '저장'을 눌러 반영해 주세요"); },
+  });
   $$('input[name="engine"]').forEach((r) => (r.onchange = () => {
     if (r.value === "claude" && r.checked && !$("#claude_key").value) claudeWizard(renderSettings);
   }));

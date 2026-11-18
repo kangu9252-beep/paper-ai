@@ -1,5 +1,6 @@
 """논문 AI — 로컬 웹 서버. 실행: start.bat (브라우저에서 http://127.0.0.1:8765)"""
 import json
+import os
 import sys
 import shutil
 import threading
@@ -30,6 +31,7 @@ class Job:
 
         def run():
             llm.set_engine(engine)  # 이 작업에서 쓸 AI: local(내 컴퓨터) / claude(인터넷)
+            pdfindex.set_scope(project_folders(pid))  # 이 논문의 참조 폴더 안에서만 근거 찾기
             if engine == "claude":
                 self.say("Claude로 작업합니다")
             try:
@@ -54,6 +56,16 @@ class Job:
 FULL_REVIEW = ["structure", "cites", "uncited", "recent", "discuss"]  # 전체 검토 중 AI를 쓰는 도구
 
 
+def project_folders(pid):
+    if not pid:
+        return []
+    r = db.q("SELECT ref_folders FROM projects WHERE id=?", (pid,), one=True)
+    try:
+        return json.loads((r or {}).get("ref_folders") or "[]")
+    except Exception:
+        return []
+
+
 def job_out(j):
     return {"id": j.id, "kind": j.kind, "status": j.status, "log": j.log[-200:], "result": j.result, "emitted": j.emitted}
 
@@ -74,6 +86,57 @@ def stop_job(jid: str):
 
 
 # ---------- 상태 / 설정 ----------
+GDRIVE = pdfindex.find_gdrive()
+
+
+@app.get("/api/fs")
+def fs_list(path: str = ""):
+    """폴더 고르기 창: 드라이브·바로가기 목록, 또는 한 폴더 안의 하위 폴더와 PDF 수."""
+    import string
+    import time
+
+    def count_pdf(p, budget):
+        n, t0, capped = 0, time.time(), False
+        for dp, dn, fn in os.walk(p):
+            dn[:] = [x for x in dn if not x.startswith((".", "$")) and x not in ("node_modules", "AppData")]
+            n += sum(1 for f in fn if f.lower().endswith(".pdf"))
+            if time.time() - t0 > budget:
+                capped = True
+                break
+        return n, capped
+
+    if not path:
+        home = os.path.expanduser("~")
+        items = []
+        for name, p in (("문서", os.path.join(home, "Documents")), ("다운로드", os.path.join(home, "Downloads")), ("바탕화면", os.path.join(home, "Desktop")), ("구글 드라이브", GDRIVE)):
+            if p and os.path.isdir(p):
+                items.append({"name": name, "path": p, "kind": "shortcut"})
+        for d in string.ascii_uppercase[2:]:
+            p = f"{d}:\\"
+            if os.path.isdir(p):
+                items.append({"name": f"{d}: 드라이브", "path": p, "kind": "drive"})
+        return {"path": "", "parent": "", "items": items}
+    if not os.path.isdir(path):
+        raise HTTPException(404, "폴더를 찾을 수 없어요")
+    items = []
+    try:
+        entries = sorted(os.scandir(path), key=lambda e: e.name.lower())
+    except PermissionError:
+        entries = []
+    direct = 0
+    for e in entries:
+        try:
+            if e.is_dir() and not e.name.startswith((".", "$")) and e.name not in ("AppData", "node_modules", "System Volume Information"):
+                n, capped = count_pdf(e.path, 0.25)
+                items.append({"name": e.name, "path": e.path, "kind": "dir", "pdfs": n, "more": capped})
+            elif e.is_file() and e.name.lower().endswith(".pdf"):
+                direct += 1
+        except OSError:
+            continue
+    parent = os.path.dirname(path.rstrip("\\/"))
+    return {"path": path, "parent": parent if parent != path else "", "items": items, "direct_pdfs": direct}
+
+
 @app.get("/api/status")
 def status():
     s = db.get_settings()
@@ -85,6 +148,7 @@ def status():
         "chunks": db.q("SELECT COUNT(*) n FROM chunks", one=True)["n"],
         "no_emb": db.q("SELECT COUNT(*) n FROM chunks WHERE emb IS NULL", one=True)["n"],
         "settings": s,
+        "gdrive": GDRIVE if GDRIVE and GDRIVE not in s.get("scan_folders", []) else "",
         "jobs": [job_out(j) | {"log": j.log[-1:]} for j in JOBS.values() if j.status == "running"],
     }
 
@@ -127,6 +191,12 @@ def get_project(pid: int):
         raise HTTPException(404)
     p["plan"] = json.loads(p["plan"]) if p["plan"] else None
     p["reports"] = json.loads(p.get("reports") or "{}")
+    p["ref_folders"] = json.loads(p.get("ref_folders") or "[]")
+    p["ref_papers"] = None  # 참조 폴더 안에서 읽힌 논문 수
+    if p["ref_folders"]:
+        pdfindex.set_scope(p["ref_folders"])
+        p["ref_papers"] = len(pdfindex.scope_ids() or [])
+        pdfindex.set_scope([])
     p["engine"] = llm.engine_for(pid)
     return p
 
@@ -136,6 +206,8 @@ def put_project(pid: int, d: dict = Body(...)):
     for k in ("title", "topic", "content", "route", "local_only"):
         if k in d:
             db.x(f"UPDATE projects SET {k}=?, updated=datetime('now','localtime') WHERE id=?", (d[k], pid))
+    if isinstance(d.get("ref_folders"), list):
+        db.x("UPDATE projects SET ref_folders=? WHERE id=?", (json.dumps([str(x) for x in d["ref_folders"]], ensure_ascii=False), pid))
     return {"ok": True}
 
 
@@ -251,17 +323,20 @@ async def upload(files: list[UploadFile] = File(...)):
 
 
 @app.post("/api/scan")
-def scan():
+def scan(d: dict = Body(default={})):
+    only = [f for f in (d or {}).get("folders", []) if isinstance(f, str) and os.path.isdir(f)]
+
     def fn(j):
-        pdfindex.scan_folders(db.get_settings()["scan_folders"], log=j.say, stop=j.stop)
+        pdfindex.scan_folders(only or db.get_settings()["scan_folders"], log=j.say, stop=j.stop)
         pdfindex.embed_missing(log=j.say)
         j.say("완료")
 
-    return {"job": Job("scan", fn).id}
+    return {"job": Job("scan", fn, llm.engine_for(None)).id}  # 저자·연도 읽기는 설정한 AI로 (Claude면 빠름)
 
 
 @app.get("/api/search")
-def search(q: str, author: str = "", year: str = "", k: int = 12):
+def search(q: str, author: str = "", year: str = "", k: int = 12, project_id: int = 0):
+    pdfindex.set_scope(project_folders(project_id))
     ids = None
     if author:
         ps = pdfindex.find_papers_by_cite(author, year)
