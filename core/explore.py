@@ -349,3 +349,99 @@ def ris(pid):
         out.append("ER  - ")
         out.append("")
     return "\n".join(out)
+
+
+# ---------- 💬 도우미 채팅 (앱 사용법 + 논문 진행 길잡이) ----------
+ANCHORS = {
+    "plan": ("plan", "연구계획 화면"),
+    "#scanBtn": ("collect", "내 컴퓨터 PDF 찾아 읽기"),
+    "#upBtn": ("collect", "PDF 파일 추가"),
+    "#moreBtn": ("collect", "인터넷에서 더 수집"),
+    "#mxPick": ("matrix", "문헌분석표 만들기"),
+    "#mxGap": ("matrix", "연구 공백 찾기"),
+    "#mxIntro": ("matrix", "서론 초안 쓰기"),
+    "#akQ": ("matrix", "내 자료에 묻기"),
+    "#mtQ": ("matrix", "근거 저울"),
+    "#mapGo": ("matrix", "연구 지도"),
+    "#jnGo": ("matrix", "투고 학술지 추천"),
+    "#mdSvg": ("matrix", "연구모형 그림"),
+    "#aiWrite": ("write", "AI로 집필"),
+    "#autoAll": ("write", "출처 필요(?) 모두 자동 찾기"),
+    "#refsBtn": ("write", "참고문헌 만들기"),
+    "#impFile": ("review", "원고 불러오기"),
+    "#tool-panel": ("review", "심사위원 3인 모의 심사"),
+    "#tool-structure": ("review", "예비심사 리뷰(일목요연함)"),
+    "#tool-cites": ("review", "인용 전체 점검"),
+    "#tool-uncited": ("review", "근거 없는 문장 찾기"),
+    "#tool-discuss": ("review", "논의 보강"),
+    "#tool-recent": ("review", "최신 연구 찾기"),
+    "#tool-refs": ("review", "참고문헌 대조"),
+    "#tool-style": ("review", "문장 다듬기"),
+    "#tool-aitone": ("review", "AI 문체 점검"),
+    "#aiUse": ("review", "AI 사용 기록·공개 문구"),
+    "settings": ("settings", "설정(AI 엔진·Claude 키·논문 폴더·도서관 로그인)"),
+}
+APP_MAP = """[논문 AI 앱의 기능과 위치]
+① 연구계획(plan): 주제를 적으면 선행연구를 조사하고 연구 경로 3개를 추천. 내가 생각한 경로를 제안할 수도 있음.
+② 자료수집(collect): 내 컴퓨터·외장하드 PDF 찾아 읽기(#scanBtn), PDF 추가(#upBtn), 승인한 경로로 인터넷에서 논문 내려받기(#moreBtn). 스캔본 PDF도 글자 인식으로 읽음.
+③ 문헌분석(matrix): 문헌분석표(#mxPick, 칸마다 원문 근거, 엑셀·Zotero 내보내기), 연구 공백·이론적 가정 찾기(#mxGap), 서론 초안(#mxIntro), 내 자료에 묻기(#akQ), 근거 저울(#mtQ, 연구들이 예/일부/아니오로 어떻게 답하는지), 연구 지도(#mapGo, 인용 관계로 핵심·최신 논문), 투고 학술지 추천(#jnGo), 연구모형 그림(#mdSvg, PNG·SVG).
+④ 집필(write): AI 장별 집필(#aiWrite, 문장마다 근거), 출처 필요(?) 자동 찾기(#autoAll), 참고문헌 만들기(#refsBtn). 편집기에서 (저자, 연도)를 쓰면 자동 인식하고, 누르면 오른쪽에 원문 위치가 열림. AI 초안은 보라색으로 표시되고 고쳐 쓰면 사라짐.
+⑤ 원고 점검(review): 원고 불러오기(#impFile, hwpx·docx·txt), 심사위원 3인 모의 심사와 답변서 재심사(#tool-panel), 예비심사 리뷰(#tool-structure), 인용 전체 점검(#tool-cites), 근거 없는 문장(#tool-uncited), 논의 보강(#tool-discuss), 최신 연구(#tool-recent), 참고문헌 대조(#tool-refs), 문장 다듬기(#tool-style), AI 문체 점검(#tool-aitone), AI 사용 기록과 투고용 공개 문구(#aiUse). 상담 사례처럼 민감한 원고는 '로컬 AI만 사용'을 켤 것.
+설정(settings): AI 엔진(내 컴퓨터 로컬 AI / Claude), Claude 키 연결 도우미, 논문 폴더, 대학 도서관 로그인, 새벽 자동 실행.
+근거 문장 맞추기에는 컴퓨터의 Ollama가 켜져 있어야 함."""
+ASSIST_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "answer": {"type": "string"},
+        "actions": {"type": "array", "items": {"type": "object", "properties": {"label": {"type": "string"}, "anchor": {"type": "string", "enum": list(ANCHORS)}}, "required": ["label", "anchor"]}},
+    },
+    "required": ["answer", "actions"],
+}
+PERSONA = {"start": "처음 시작(주제만 있음)", "draft": "초안이 있음(쓰는 중)", "revise": "심사·수정을 앞둠(거의 완성)"}
+
+
+def _state(pid):
+    if not pid:
+        return "아직 논문 프로젝트를 열지 않음."
+    p = db.q("SELECT * FROM projects WHERE id=?", (pid,), one=True)
+    if not p:
+        return "프로젝트 없음."
+    rep = json.loads(p.get("reports") or "{}")
+    text = BeautifulSoup(p.get("content") or "", "html.parser")
+    cites = text.select("span.cite")
+    m = json.loads(p.get("matrix") or "{}")
+    papers = db.q("SELECT COUNT(*) n FROM papers WHERE status='ok'", one=True)["n"]
+    lines = [
+        f"논문 제목: {p.get('title')}", f"주제: {p.get('topic')}",
+        f"길잡이 유형: {PERSONA.get((rep.get('guide') or {}).get('persona'), '아직 안 고름')}",
+        f"연구계획: {'있음' if p.get('plan') else '없음'}", f"내 자료 PDF: {papers}편", f"문헌분석표: {len(m)}편",
+        f"원고: {len(text.get_text())}자, 인용 {len(cites)}개(근거 연결 {sum(1 for c in cites if c.get('data-chunk'))}개)",
+        f"AI 엔진: {llm.engine_for(pid)}", f"로컬 AI만 사용: {'예' if p.get('local_only') else '아니오'}",
+    ]
+    for k, label in (("structure", "예비심사 리뷰"), ("panel", "3인 모의 심사"), ("cites", "인용 점검"), ("refs", "참고문헌 대조"), ("style", "문장 다듬기"), ("aitone", "AI 문체 점검")):
+        if rep.get(k):
+            lines.append(f"{label} 결과: {rep[k].get('summary', '')[:160]}")
+    if rep.get("panel", {}).get("data", {}).get("required"):
+        req = rep["panel"]["data"]["required"]
+        lines.append("모의 심사 수정 요구: " + " / ".join(f"{it['id']}. {it['issue'][:60]}({it.get('status') or '미답변'})" for it in req[:10]))
+    if rep.get("gaps"):
+        lines.append("연구 공백: " + " / ".join(g["gap"][:60] for g in rep["gaps"].get("gaps", [])[:4]))
+    return "\n".join(lines)
+
+
+def assist(pid, messages, log):
+    convo = "\n".join(f"{'연구자' if m.get('role') == 'user' else '도우미'}: {m.get('content', '')[:1500]}" for m in messages[-12:])
+    r = llm.chat(
+        f"{APP_MAP}\n\n[지금 연구자의 진행 상황]\n{_state(pid)}\n\n[대화]\n{convo}\n\n"
+        "마지막 연구자 말에 답하세요. answer는 쉬운 한국어로, 짧은 문단이나 번호 목록으로(길어도 10줄). 무엇을, 왜, 어떤 순서로 하면 되는지 구체적으로. "
+        "앱 기능이 도움이 되면 actions에 바로가기 버튼을 1~3개 넣으세요(label은 버튼 글자, anchor는 위 기능 위치). "
+        "논문 방법론 질문에는 일반적인 원칙으로 답하되, 학교·학과 규정과 지도교수 판단을 확인하라고 덧붙이세요. 모르는 것은 모른다고 하세요.",
+        system="당신은 '논문 AI' 앱 안의 도우미입니다. 상담심리 등 사회과학 대학원생이 학위논문을 쓰도록 돕는 친절한 선배 연구자이자 앱 안내자입니다. "
+        "연구자는 개발자가 아니므로 전문용어는 풀어서 설명합니다.",
+        schema=ASSIST_SCHEMA,
+        num_ctx=8192,
+        num_predict=900,
+        temperature=0.3,
+    )
+    acts = [{"label": a["label"], "anchor": a["anchor"], "tab": ANCHORS[a["anchor"]][0]} for a in r.get("actions", []) if a.get("anchor") in ANCHORS][:3]
+    return {"answer": r.get("answer", ""), "actions": acts}

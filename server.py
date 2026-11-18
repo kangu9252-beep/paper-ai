@@ -455,6 +455,24 @@ def refs_ris(pid: int):
     return Response(explore.ris(pid), media_type="application/x-research-info-systems", headers={"Content-Disposition": f"attachment; filename=refs_{pid}.ris"})
 
 
+@app.put("/api/projects/{pid}/guide")
+def guide_set(pid: int, d: dict = Body(...)):
+    persona = d.get("persona")
+    if persona not in explore.PERSONA:
+        raise HTTPException(400)
+    matrix._save_report(pid, "guide", {"persona": persona})
+    return {"ok": True}
+
+
+@app.post("/api/assist")
+def assist(d: dict = Body(...)):
+    pid = d.get("project_id")
+    msgs = [m for m in d.get("messages", []) if isinstance(m, dict)][-12:]
+    if not msgs:
+        raise HTTPException(400, "질문을 적어주세요")
+    return {"job": Job("assist", lambda j: explore.assist(pid, msgs, j.say), llm.engine_for(pid), None, None).id}
+
+
 @app.post("/api/explain")
 def explain(d: dict = Body(...)):
     pid = d.get("project_id")

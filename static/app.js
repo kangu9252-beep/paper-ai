@@ -121,6 +121,8 @@ async function createProject(topic, idea = "") {
   topic = topic.trim();
   if (!topic) return toast("주제를 적어주세요");
   const { id } = await api("/api/projects", { json: { topic } });
+  await api(`/api/projects/${id}/guide`, { method: "PUT", json: { persona: "start" } });
+  S.guideOpen = true;
   await openProject(id);
   startPlan(idea);
 }
@@ -137,10 +139,22 @@ function showWelcome() {
   S.cur = null;
   loadProjects();
   $("#main").innerHTML = $("#tpl-welcome").innerHTML;
+  S.persona = S.persona || "";
+  const pick = (k) => {
+    S.persona = k;
+    $$(".persona", $("#main")).forEach((c) => c.classList.toggle("on", c.dataset.p === k));
+    $("#wStart").style.display = k === "start" ? "" : "none";
+    $("#wImport").style.display = k === "start" ? "none" : "";
+    $("#wImpTitle").textContent = k === "revise" ? "심사·수정할 원고를 불러오세요" : "쓰고 있는 원고를 불러오세요";
+  };
+  $$(".persona", $("#main")).forEach((c) => (c.onclick = () => pick(c.dataset.p)));
+  if (S.persona) pick(S.persona);
   $("#welcomeGo").onclick = () => createProject($("#welcomeTopic").value, $("#welcomeIdea").value);
   $("#wImpFile").onclick = () => $("#wImpInput").click();
   const done = async (fd) => {
     const { id } = await api("/api/import", { method: "POST", body: fd });
+    await api(`/api/projects/${id}/guide`, { method: "PUT", json: { persona: S.persona === "revise" ? "revise" : "draft" } });
+    S.guideOpen = true;
     await openProject(id, "review");
     toast("원고를 불러왔어요. 점검할 항목을 골라 실행하세요.");
   };
@@ -169,7 +183,9 @@ function renderProject() {
       <span class="badge ${p.engine === "claude" ? "" : "gray"}" title="이 프로젝트에서 쓰는 AI">${p.engine === "claude" ? "Claude" : "로컬 AI"}</span>
       <button class="ghost small" id="delProj">삭제</button>
     </div>
+    <div id="guideBar"></div>
     <div id="tabBody"></div>`;
+  renderGuide();
   $$(".tab").forEach((b) => {
     b.classList.toggle("active", b.dataset.tab === S.tab);
     b.onclick = () => { saveNow(); S.tab = b.dataset.tab; renderProject(); };
@@ -185,6 +201,149 @@ function renderProject() {
   };
   ({ plan: renderPlan, collect: renderCollect, matrix: renderMatrix, write: renderWrite, review: renderReview })[S.tab]();
 }
+
+// ---------- 🧭 길잡이 (유형별 6단계) ----------
+const mxCount = (p) => { try { return Object.keys(JSON.parse(p.matrix || "{}")).length; } catch { return 0; } };
+const txtLen = (p) => (p.content || "").replace(/<[^>]+>/g, "").trim().length;
+const has = (p, k) => !!(p.reports || {})[k];
+const GUIDE = {
+  start: { name: "🌱 처음 시작해요", sub: "주제만 있어요", steps: [
+    { t: "주제 정하고 연구계획 세우기", why: "주제를 적으면 선행연구를 조사해 연구 경로 3개를 추천해요. 마음에 드는 경로를 고르거나 내 생각을 제안하세요.", tab: "plan", a: "plan", done: (p) => !!p.plan },
+    { t: "논문 PDF 모으기", why: "고른 경로에 맞는 논문을 내려받고, 내 컴퓨터·외장하드의 PDF도 읽어 들여요.", tab: "collect", a: "#scanBtn", done: () => (S.status?.papers || 0) >= 10 },
+    { t: "문헌분석표 만들기", why: "논문마다 목적·대상·변인·측정도구·결과를 표로 정리해요. 모든 칸에 원문 근거가 달려요.", tab: "matrix", a: "#mxPick", done: (p) => mxCount(p) >= 5 },
+    { t: "연구 공백 찾고 연구모형 그리기", why: "선행연구가 아직 안 한 것을 숫자로 확인하고, 내 연구의 변인 관계를 그림으로 정리해요.", tab: "matrix", a: "#mxGap", done: (p) => has(p, "gaps") },
+    { t: "서론부터 장별로 쓰기", why: "서론 초안과 장별 집필 모두 문장마다 근거가 달려요. AI 초안(보라색)은 꼭 내 말로 고쳐 쓰세요.", tab: "write", a: "#aiWrite", done: (p) => txtLen(p) > 3000 },
+    { t: "예비심사 대비 점검", why: "일목요연한지 보고, 심사위원 3인 모의 심사로 나올 질문을 미리 받아봐요.", tab: "review", a: "#tool-panel", done: (p) => has(p, "panel") || has(p, "structure") },
+  ] },
+  draft: { name: "✍ 초안이 있어요", sub: "어느 정도 썼어요", steps: [
+    { t: "원고 불러오기", why: "한글(.hwpx)·워드(.docx) 원고를 올리면 (저자, 연도) 인용을 자동으로 알아봐요.", tab: "review", a: "#impFile", done: (p) => txtLen(p) > 500 },
+    { t: "내 논문 PDF 연결하기", why: "인용한 논문 원문이 있는 폴더(외장하드 포함)를 읽어 들여야 근거를 찾을 수 있어요.", tab: "collect", a: "#scanBtn", done: () => (S.status?.papers || 0) >= 10 },
+    { t: "출처 확인하기", why: "원고 속 인용이 원문과 맞는지, 근거 없이 주장한 문장은 없는지 확인해요.", tab: "write", a: "#autoAll", done: (p) => has(p, "cites") || has(p, "uncited") },
+    { t: "선행연구 보강하기", why: "문헌분석표로 선행연구를 정리하고, 최신 연구와 연구 공백을 확인해 서론·이론적 배경을 단단하게 해요.", tab: "matrix", a: "#mxPick", done: (p) => mxCount(p) >= 5 || has(p, "recent") },
+    { t: "논문의 줄기 점검", why: "연구문제→선행연구→방법→결과→결론이 한 줄기인지 예비심사 리뷰로 봐요.", tab: "review", a: "#tool-structure", done: (p) => has(p, "structure") },
+    { t: "참고문헌·문장 마무리", why: "본문 인용과 참고문헌 목록을 맞추고, 비문·시제·과장 표현을 다듬어요.", tab: "review", a: "#tool-refs", done: (p) => has(p, "refs") && has(p, "style") },
+  ] },
+  revise: { name: "🎓 심사·수정을 앞두고 있어요", sub: "거의 완성했어요", steps: [
+    { t: "원고 불러오기", why: "최신 원고를 올려 주세요. 다시 올리면 지금 원고를 바꿔요.", tab: "review", a: "#impFile", done: (p) => txtLen(p) > 500 },
+    { t: "심사위원 3인 모의 심사", why: "방법론·이론·지도교수형 심사위원이 각자 심사하고 토론해 판정해요. 심사 종류(예비심사·본심사·학술지)를 고르세요.", tab: "review", a: "#tool-panel", done: (p) => has(p, "panel") },
+    { t: "답변서 쓰고 재심사 받기", why: "수정 요구마다 어떻게 고쳤는지 적으면 재심사로 해결됐는지 알려줘요. 실제 심사 답변 연습도 돼요.", tab: "review", a: "#tool-panel", done: (p) => (p.reports?.panel?.data?.round || 1) > 1 },
+    { t: "인용·참고문헌 최종 확인", why: "가짜 인용이나 연도 불일치는 심사에서 치명적이에요. 원문 대조와 참고문헌 대조를 해요.", tab: "review", a: "#tool-cites", done: (p) => has(p, "cites") && has(p, "refs") },
+    { t: "문장 다듬기 · AI 문체 점검", why: "비문·과장 표현을 고치고, AI가 쓴 티가 나는 문장을 자연스럽게 다듬어요.", tab: "review", a: "#tool-aitone", done: (p) => has(p, "style") || has(p, "aitone") },
+    { t: "투고 준비", why: "투고할 학술지 후보를 보고, AI 사용 공개 문구를 투고 규정에 맞게 넣어요.", tab: "matrix", a: "#jnGo", done: (p) => has(p, "journals") },
+  ] },
+};
+
+function renderGuide() {
+  const box = $("#guideBar");
+  const p = S.cur;
+  if (!box || !p) return;
+  const persona = p.reports?.guide?.persona;
+  if (!persona) {
+    box.innerHTML = `<div class="guide ask"><b>🧭 길잡이</b> 지금 어디쯤 계세요? 고르시면 해야 할 일을 순서대로 알려드려요.
+      ${Object.entries(GUIDE).map(([k, g]) => `<button class="small" data-persona="${k}">${g.name} <span class="muted">${g.sub}</span></button>`).join("")}
+      <button class="small ghost" id="guideHide">나중에</button></div>`;
+  } else {
+    const g = GUIDE[persona];
+    const st = g.steps.map((x) => !!x.done(p));
+    const cur = st.indexOf(false);
+    const open = S.guideOpen;
+    box.innerHTML = `<div class="guide"><div class="row"><b>🧭 ${g.name}</b>
+        <span class="g-prog">${st.map((d, i) => `<i class="${d ? "d" : i === cur ? "c" : ""}" title="${esc(g.steps[i].t)}"></i>`).join("")}</span>
+        <span class="small muted">${st.filter(Boolean).length}/${st.length}</span>
+        ${cur >= 0 ? `<span class="grow small">지금 할 일: <b>${cur + 1}. ${esc(g.steps[cur].t)}</b></span><button class="small primary" data-go="${cur}">여기서 하기 →</button>` : `<span class="grow small">🎉 모든 단계를 마쳤어요!</span>`}
+        <button class="small ghost" id="guideToggle">${open ? "접기 ▴" : "전체 단계 ▾"}</button></div>
+      ${open ? `<ol class="g-steps">${g.steps.map((x, i) => `<li class="${st[i] ? "d" : i === cur ? "c" : ""}"><div class="row"><b class="grow">${st[i] ? "✔" : i + 1 + "."} ${esc(x.t)}</b><button class="small" data-go="${i}">여기서 하기</button></div><div class="small muted">${esc(x.why)}</div></li>`).join("")}</ol>
+        <div class="small muted">유형 바꾸기: ${Object.entries(GUIDE).map(([k, gg]) => `<a href="#" data-persona="${k}">${gg.name}</a>`).join(" · ")} · 막히면 오른쪽 아래 <b>💬 도우미</b>에게 물어보세요.</div>` : ""}</div>`;
+    $$("[data-go]", box).forEach((b) => (b.onclick = () => { const x = g.steps[+b.dataset.go]; goTo(x.tab, x.a); }));
+    $("#guideToggle").onclick = () => { S.guideOpen = !S.guideOpen; renderGuide(); };
+  }
+  $$("[data-persona]", box).forEach((b) => (b.onclick = async (e) => {
+    e.preventDefault();
+    await api(`/api/projects/${p.id}/guide`, { method: "PUT", json: { persona: b.dataset.persona } });
+    S.cur = await api(`/api/projects/${p.id}`);
+    S.guideOpen = true;
+    renderGuide();
+  }));
+  if ($("#guideHide")) $("#guideHide").onclick = () => (box.innerHTML = "");
+}
+
+// 기능 위치로 이동: 탭을 열고 그 버튼·카드를 깜빡여 보여줌
+function goTo(tab, anchor) {
+  if (tab === "settings") { renderSettings(); return; }
+  if (!S.cur) { toast("먼저 논문 프로젝트를 열어 주세요"); return; }
+  saveNow();
+  if (S.tab !== tab) { S.tab = tab; renderProject(); }
+  if (!anchor || anchor === tab) return;
+  let n = 0;
+  const t = setInterval(() => {
+    const el = $(anchor);
+    if (el || ++n > 30) {
+      clearInterval(t);
+      if (!el) return;
+      el.scrollIntoView({ block: "center", behavior: "smooth" });
+      el.classList.add("g-flash");
+      setTimeout(() => el.classList.remove("g-flash"), 2400);
+    }
+  }, 150);
+}
+
+// ---------- 💬 도우미 채팅 ----------
+S.chat = {};
+function chatKey() { return S.cur ? S.cur.id : 0; }
+function renderChat() {
+  let w = $("#chatWin");
+  const msgs = S.chat[chatKey()] || [];
+  if (!w) return;
+  const body = $("#chatBody", w);
+  body.innerHTML = (msgs.length ? "" : `<div class="cm bot">안녕하세요! 논문 쓰다 막히는 것, 앱 사용법, 무엇이든 물어보세요.${S.cur ? `<br><span class="muted small">지금 '${esc(S.cur.title)}' 진행 상황을 알고 답해요.</span>` : ""}
+      <div class="chips">${["다음에 뭘 하면 돼요?", "예비심사 준비는 어떻게 해요?", "출처 확인은 어떻게 해요?", "매개효과 이론적 근거는 어디까지 써야 해요?"].map((q) => `<button class="small" data-q="${esc(q)}">${esc(q)}</button>`).join("")}</div></div>`)
+    + msgs.map((m) => `<div class="cm ${m.role === "user" ? "me" : "bot"}">${esc(m.content).replace(/\n/g, "<br>")}
+      ${(m.actions || []).length ? `<div class="chips">${m.actions.map((a) => `<button class="small primary" data-tab="${a.tab}" data-anchor="${esc(a.anchor)}">${esc(a.label)} →</button>`).join("")}</div>` : ""}</div>`).join("")
+    + (S.chatBusy ? `<div class="cm bot"><span class="spin"></span> 생각하는 중…</div>` : "");
+  body.scrollTop = body.scrollHeight;
+  $$("[data-q]", body).forEach((b) => (b.onclick = () => sendChat(b.dataset.q)));
+  $$("[data-anchor]", body).forEach((b) => (b.onclick = () => goTo(b.dataset.tab, b.dataset.anchor)));
+}
+async function sendChat(text) {
+  text = (text || "").trim();
+  if (!text || S.chatBusy) return;
+  const k = chatKey();
+  (S.chat[k] = S.chat[k] || []).push({ role: "user", content: text });
+  S.chatBusy = true;
+  renderChat();
+  try {
+    const { job } = await api("/api/assist", { json: { project_id: S.cur?.id || null, messages: S.chat[k].map(({ role, content }) => ({ role, content })) } });
+    runJob(job, "도우미", {
+      onDone: (r, j) => {
+        S.chatBusy = false;
+        S.chat[k].push(j.status === "done" && r ? { role: "bot", content: r.answer, actions: r.actions } : { role: "bot", content: "답을 만들지 못했어요. " + ((j.log || []).slice(-1)[0] || "") });
+        renderChat();
+      },
+    });
+  } catch (e) {
+    S.chatBusy = false;
+    S.chat[k].push({ role: "bot", content: "연결에 실패했어요: " + e.message });
+    renderChat();
+  }
+}
+(function mountChat() {
+  const fab = document.createElement("button");
+  fab.id = "chatFab";
+  fab.textContent = "💬 도우미";
+  document.body.appendChild(fab);
+  const w = document.createElement("div");
+  w.id = "chatWin";
+  w.className = "hidden";
+  w.innerHTML = `<div class="ch-head"><b>💬 논문 도우미</b><span class="grow"></span><button class="ghost small" id="chatClear" title="대화 지우기">새 대화</button><button class="ghost small" id="chatClose">✕</button></div>
+    <div id="chatBody"></div>
+    <div class="ch-in"><textarea id="chatText" rows="2" placeholder="질문을 적고 Enter (줄바꿈은 Shift+Enter)"></textarea><button class="primary" id="chatSend">보내기</button></div>`;
+  document.body.appendChild(w);
+  fab.onclick = () => { w.classList.toggle("hidden"); renderChat(); if (!w.classList.contains("hidden")) $("#chatText").focus(); };
+  $("#chatClose").onclick = () => w.classList.add("hidden");
+  $("#chatClear").onclick = () => { S.chat[chatKey()] = []; renderChat(); };
+  $("#chatSend").onclick = () => { sendChat($("#chatText").value); $("#chatText").value = ""; };
+  $("#chatText").onkeydown = (e) => { if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); $("#chatSend").click(); } };
+})();
 
 // ---------- ① 연구계획 ----------
 let planJob = {};

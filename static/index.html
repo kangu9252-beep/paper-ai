@@ -39,20 +39,28 @@
 
 <template id="tpl-welcome">
   <div class="welcome">
-    <h1>어떤 논문을 쓰고 싶으세요?</h1>
-    <p>주제를 적으면 로컬 AI가 선행연구를 조사하고, 연구 경로를 추천합니다.<br>
-       승인하면 자료를 직접 내려받아 읽고, <b>모든 문장에 근거를 달아</b> 초안을 씁니다.</p>
+    <h1>지금 어디쯤 계세요?</h1>
+    <p>고르시면 해야 할 일을 6단계로 안내해 드려요. 막히면 언제든 오른쪽 아래 <b>💬 도우미</b>에게 물어보세요.</p>
+    <div class="personas">
+      <div class="persona" data-p="start"><div class="pe-ic">🌱</div><b>처음 시작해요</b><span>주제만 있어요. 선행연구 조사부터 도와주세요.</span></div>
+      <div class="persona" data-p="draft"><div class="pe-ic">✍</div><b>초안이 있어요</b><span>어느 정도 썼어요. 출처 확인과 보강이 필요해요.</span></div>
+      <div class="persona" data-p="revise"><div class="pe-ic">🎓</div><b>심사·수정을 앞뒀어요</b><span>거의 완성했어요. 심사 대비와 마무리가 필요해요.</span></div>
+    </div>
+    <div id="wStart" style="display:none">
+    <h3 style="margin-top:18px">어떤 논문을 쓰고 싶으세요?</h3>
+    <p class="small muted">주제를 적으면 선행연구를 조사하고 연구 경로를 추천합니다. 승인하면 자료를 내려받아 읽고, <b>모든 문장에 근거를 달아</b> 초안을 씁니다.</p>
     <textarea id="welcomeTopic" rows="3" placeholder="예) 성인 애착 유형이 자기자비와 우울의 관계에 미치는 영향"></textarea>
     <details class="small" style="margin-bottom:10px"><summary>생각해 둔 연구 방향이 있나요? (선택)</summary>
       <textarea id="welcomeIdea" rows="3" placeholder="예) 상담 대학원생 200명에게 설문해서 애착 불안 → 자기자비 → 우울 매개모형을 검증하고 싶다"></textarea></details>
     <button class="primary" id="welcomeGo">연구계획 세우기 →</button>
-    <ol class="steps">
+    </div>
+    <ol class="steps" style="display:none">
       <li><b>① 연구계획</b> 주제 분석 · 선행연구 조사 · 연구 경로 3가지 추천</li>
       <li><b>② 자료수집</b> 승인한 경로에 맞춰 논문 PDF를 직접 내려받음 (필요하면 도서관 로그인)</li>
       <li><b>③ 집필</b> 문장마다 (저자, 연도) 근거 — 누르면 오른쪽에 원문 위치가 형광펜으로</li>
     </ol>
-    <div class="card" style="margin-top:28px">
-      <h3>이미 쓴 원고가 있나요? — 원고 보강하기</h3>
+    <div class="card" id="wImport" style="margin-top:18px;display:none">
+      <h3 id="wImpTitle">쓰고 있는 원고를 불러오세요</h3>
       <p class="small muted" style="margin-top:0">원고를 불러오면 인용 근거 확인 · 근거 없는 문장 찾기 · 논의 보강 · 최신 연구 · 참고문헌 대조를 해드려요.</p>
       <div class="row"><button id="wImpFile">📄 원고 파일 올리기 (.docx · .hwpx · .txt)</button><input type="file" id="wImpInput" accept=".docx,.hwpx,.txt,.md,.hwp" hidden>
         <button id="wImpPasteBtn">📋 글 붙여넣기</button></div>
