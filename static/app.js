@@ -989,10 +989,13 @@ function layoutMemos() {
       m.style.top = y + "px";
       m.innerHTML = `<span class="dot"><b>💬</b>심사 의견${notes.length > 1 ? " " + notes.length : ""}</span>
         <div class="box">${notes.map((n, i) => `<div class="rvn"><div class="lbl"><span class="badge sev-${esc(n.sev)}">${esc(n.sev)}</span> ${esc(n.cat)}</div>
-          <div>${esc(n.issue)}</div>${n.fix ? `<div class="prog">✏ ${esc(n.fix)}</div>` : ""}${n.q ? `<div class="prog">🎤 “${esc(n.q)}”</div>` : ""}
+          <div>${esc(n.issue)}</div>${n.fix ? `<div class="prog">✏ ${esc(n.fix)}</div>` : ""}${n.cat === "AI 문체" && n.fix ? `<div class="row"><button data-cpfix="${i}">수정안 복사</button></div>` : ""}${n.q ? `<div class="prog">🎤 “${esc(n.q)}”</div>` : ""}
           <div class="row"><button data-done="${i}">반영했어요</button></div></div>`).join("")}</div>`;
       margin.appendChild(m);
       $(".dot", m).onclick = () => toggleMemo(c);
+      $$("[data-cpfix]", m).forEach((b) => (b.onclick = async () => {
+        try { await navigator.clipboard.writeText(notes[+b.dataset.cpfix].fix); toast("수정안을 복사했어요"); } catch { toast("복사하지 못했어요"); }
+      }));
       $$("[data-done]", m).forEach((b) => (b.onclick = () => {
         notes.splice(+b.dataset.done, 1);
         if (notes.length) c.dataset.review = JSON.stringify(notes);
@@ -1149,6 +1152,7 @@ const TOOL_INFO = [
   ["uncited", "③ 근거 없는 문장 찾기", "인용 없이 주장하는 문장에 '출처 필요'를 달고, 내 자료에서 근거를 추천해요. (연구방법·결과 장은 제외)"],
   ["discuss", "④ 논의 보강", "결과 장에서 핵심 결과를 뽑아 일치하는 연구·상반되는 연구를 찾고, 논의에 쓸 문장을 제안해요."],
   ["recent", "⑤ 최신 연구 찾기", "최근 3년 사이 나온 관련 논문 중 원고에 아직 없는 것을 찾아, 원고 어디에 쓰면 좋을지 알려줘요."],
+  ["aitone", "⑧ AI 문체 점검", "제출 전에 AI가 쓴 티가 나는 문장을 찾아요 — 문장마다 AI 확률(0~100%)과 AI/의심/사람 분류, 13가지 언어 패턴(문장 길이 균일, 헤지어 과다, 기계적 전환어 등)으로 이유를 보여주고 자연스러운 수정안을 제시해요. 수정안도 AI 도움이라 'AI 사용 기록'에 남아 공개 문구에 반영돼요."],
   ["style", "⑦ 문장 다듬기", "교정자처럼 문장을 점검해요 — 비문·호응, 시제·어미(계획서는 '~할 것이다'), '완벽하게·입증한다' 같은 과장 표현, 중복, 구어체, 용어 일관성. 고친 예시와 함께 원고 옆 💬 메모로 달려요."],
   ["refs", "⑥ 참고문헌 대조", "본문 인용과 참고문헌 목록을 맞춰봐요 — 목록에 없는 인용 · 연도가 다른 것 · 본문에서 안 쓰인 문헌. (몇 초)"],
 ];
@@ -1167,6 +1171,16 @@ function reportHtml(k, rep) {
   const d = rep.data;
   let h = `<div class="rv-sum">${esc(rep.summary)} <span class="muted small">· ${esc(rep.ran_at)} · ${rep.engine === "claude" ? "Claude" : "로컬 AI"}</span></div>`;
   const st = { ok: "✔", warn: "⚠", need: "?" };
+  if (k === "aitone" && d && d.items) {
+    const st = d.stats || {};
+    h += `<div class="at-meter"><div class="at-bar"><span class="at-ai" style="width:${d.ai_pct}%"></span><span class="at-sus" style="width:${d.sus_pct}%"></span></div>
+      <div class="small"><b style="color:var(--warn)">AI ${d.ai_pct}%</b> · <b style="color:#c98a00">의심 ${d.sus_pct}%</b> · 사람 ${Math.max(0, 100 - d.ai_pct - d.sus_pct)}% <span class="muted">(글자 수 기준)</span></div>
+      ${st.sentences ? `<div class="small muted">전체 ${st.sentences}문장 · 평균 ${st.len_mean}자 · 문장 길이 변화 ${st.len_cv}${st.len_cv < 0.35 ? " (고른 편 — 기계적으로 보일 수 있음)" : ""} · 헤지어 ${st.hedge}% · 기계적 전환어로 시작 ${st.trans}%</div>` : ""}</div>`;
+    h += d.items.map((it) => `<div class="rv-item ${it.label === "AI" ? "need" : "warn"}" data-para="${esc(it.id)}" style="cursor:pointer">
+      <span class="badge rq-${it.label === "AI" ? "need" : "warn"}">${it.label} ${it.score}%</span> <span class="small muted">${esc(it.id)} · ${esc((it.patterns || []).join(", "))}</span>
+      <div class="small">“${esc(it.sentence)}”</div><div class="small muted">${esc(it.reason)}</div>
+      ${it.rewrite ? `<div class="small at-fix">✏ ${esc(it.rewrite)} <button class="small ghost" data-copy-fix="${esc(it.rewrite)}">복사</button></div>` : ""}</div>`).join("") || `<div class="rv-item ok">✔ AI처럼 보이는 문장이 없어요</div>`;
+  }
   if (k === "style" && Array.isArray(d) && d.length) {
     h += d.map((it) => `<div class="rv-item warn" data-para="${esc(it.id)}" style="cursor:pointer"><span class="badge gray">${esc(it.category)}</span> <span class="small muted">${esc(it.id)}</span> “${esc(it.excerpt)}”
       <div class="small">${esc(it.problem)}</div>${it.fix ? `<div class="small">✏ ${esc(it.fix)}</div>` : ""}</div>`).join("");
@@ -1328,6 +1342,10 @@ async function renderReview() {
   // 결과에서 원고로 이동
   $$(".rv-item[data-cid]", body).forEach((d) => (d.onclick = () => { S.focusCid = d.dataset.cid; S.tab = "write"; renderProject(); }));
   $$("[data-para]", body).forEach((d) => (d.onclick = () => { S.focusPara = d.dataset.para; S.tab = "write"; renderProject(); }));
+  $$("[data-copy-fix]", body).forEach((b) => (b.onclick = async (e) => {
+    e.stopPropagation();
+    try { await navigator.clipboard.writeText(b.dataset.copyFix); toast("수정안을 복사했어요 — ④ 집필에서 붙여넣으세요"); } catch { toast("복사하지 못했어요"); }
+  }));
   if ($("#pnRespond")) $("#pnRespond").onclick = async () => {
     const responses = Object.fromEntries($$(".pn-resp", body).map((t) => [t.dataset.resp, t.value]));
     if (!Object.values(responses).some((v) => v.trim())) return toast("답변을 하나 이상 적어주세요");

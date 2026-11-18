@@ -816,7 +816,8 @@ FEATURES = {
     "model": ("연구모형 변인 정리", "struct"),
     "panel": ("심사위원 3인 모의 심사", "struct"),
     "panel_respond": ("모의 심사 재심사", "struct"),
-    "style": ("문장 다듬기(교정)", "struct"),
+    "style": ("문장 다듬기(교정)", "polish"),
+    "aitone": ("AI 문체 점검·문장 수정안", "polish"),
     "journals": ("투고 학술지 추천", "lit"),
     "ask": ("내 자료에 묻기", "lit"),
 }
@@ -825,6 +826,7 @@ PURPOSE = {
     "cite": ("인용 근거 확인", "verification of citations against source texts"),
     "struct": ("원고의 논리 구조 점검", "checking the logical structure of the manuscript"),
     "draft": ("일부 문장의 초안 작성", "drafting of some sentences"),
+    "polish": ("문장 표현 다듬기", "polishing of wording and style"),
 }
 
 
@@ -853,12 +855,14 @@ def ai_usage(pid):
         f"본 연구는 {', '.join(PURPOSE[k][0] for k in kinds)}에 인공지능 도구인 {', '.join(tools_ko) or 'AI 도구'}를 보조적으로 활용하였다. "
         "AI가 제시한 문헌과 인용은 모두 연구자가 원문과 대조하여 확인하였다. "
         + ("AI가 작성한 초안은 연구자가 검토하고 수정하였다. " if used_draft else "")
+        + ("AI가 제안한 문장 수정안은 연구자가 선택적으로 검토하여 반영하였다. " if "polish" in kinds else "")
         + "연구의 설계, 자료 분석과 해석, 최종 원고의 내용에 대한 책임은 연구자에게 있다."
     )
     en = (
         f"AI tools, namely {' and '.join(tools_en) or 'general-purpose AI tools'}, were used to assist with {', '.join(PURPOSE[k][1] for k in kinds)}. "
         "All literature and citations suggested by AI were checked by the author against the original sources. "
         + ("Drafts produced by AI were reviewed and revised by the author. " if used_draft else "")
+        + ("Wording suggestions from AI were reviewed and selectively adopted by the author. " if "polish" in kinds else "")
         + "The author is fully responsible for the study design, data analysis and interpretation, and the content of the final manuscript."
     )
     return {"rows": rows, "drafts": drafts, "ko": ko, "en": en}
@@ -1104,3 +1108,108 @@ def style_check(pid, log, stop=lambda: False):
 
 
 TOOLS["style"] = style_check
+
+
+# ---------- AI 문체 점검 (AI가 쓴 티 찾기 · 자연스러운 수정안) ----------
+AI_PATTERNS = [
+    "문장 길이·구조 균일", "헤지어 과다", "기계적 전환어", "추상적 상투어", "셋씩 나열", "요약·정리 문장 반복",
+    "같은 구문 반복", "대칭 구조 남용", "구체성 없는 일반화", "불필요한 메타 진술", "명사화 과다", "수식어 과다", "근거 없는 포괄 진술",
+]
+HEDGE_RE = re.compile(r"할 수 있(다|을 것이다)|것으로 보인다|것으로 판단된다|라고 할 수 있다|가능성이 있다|것으로 사료된다")
+TRANS_RE = re.compile(r"^(또한|나아가|더불어|이러한 맥락에서|이와 같이|이처럼|따라서|결론적으로|요컨대|아울러|특히)")
+AITONE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "items": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string"},
+                    "sentence": {"type": "string"},
+                    "score": {"type": "integer"},
+                    "patterns": {"type": "array", "items": {"type": "string", "enum": AI_PATTERNS}},
+                    "reason": {"type": "string"},
+                    "rewrite": {"type": "string"},
+                },
+                "required": ["id", "sentence", "score", "patterns", "reason", "rewrite"],
+            },
+        }
+    },
+    "required": ["items"],
+}
+
+
+def _sents(t):
+    return [s.strip() for s in re.split(r"(?<=[다요음함됨]\.)\s+|(?<=[.?!])\s+(?=[A-Z가-힣])", t) if len(s.strip()) >= 12]
+
+
+def _tone_stats(paras):
+    """AI 없이 세는 지표: 문장 길이의 고르기, 헤지어·전환어 비율."""
+    sents = [s for _, _, t in paras for s in _sents(t)]
+    if not sents:
+        return {}
+    lens = [len(s) for s in sents]
+    mean = sum(lens) / len(lens)
+    sd = (sum((x - mean) ** 2 for x in lens) / len(lens)) ** 0.5
+    return {
+        "sentences": len(sents),
+        "len_mean": round(mean),
+        "len_cv": round(sd / mean, 2) if mean else 0,  # 낮을수록 문장 길이가 기계적으로 고름
+        "hedge": round(sum(1 for s in sents if HEDGE_RE.search(s)) / len(sents) * 100),
+        "trans": round(sum(1 for s in sents if TRANS_RE.search(s)) / len(sents) * 100),
+    }
+
+
+def ai_tone(pid, log, stop=lambda: False):
+    p, soup = load(pid)
+    for el in soup.select("[data-review]"):  # 지난 AI 문체 메모만 지움
+        try:
+            notes = [n for n in json.loads(el["data-review"]) if n.get("cat") != "AI 문체"]
+        except Exception:
+            notes = []
+        if notes:
+            el["data-review"] = json.dumps(notes, ensure_ascii=False)
+        else:
+            del el["data-review"]
+    paras = [(k, el, t) for _, ps in _para_blocks(soup) for k, el, t in ps]
+    byid = {k: el for k, el, _ in paras}
+    stats = _tone_stats(paras)
+    found, step = [], 10
+    for i in range(0, len(paras), step):
+        if stop():
+            return
+        part = paras[i : i + step]
+        log(f"[{i // step + 1}/{(len(paras) + step - 1) // step}] 문장마다 AI 문체 점검 중…")
+        r = llm.chat(
+            "\n\n".join(f"{k}: {t[:1600]}" for k, _, t in part) + "\n\n"
+            "각 문장이 AI가 쓴 글처럼 보이는 정도를 판단하세요. 기준 13가지: " + ", ".join(AI_PATTERNS) + ".\n"
+            "AI처럼 보이는 정도(score)가 40 이상인 문장만 고르세요(점수 0~100). 각 항목: id(P번호), sentence(원문 문장 그대로), score, "
+            "patterns(해당 기준), reason(왜 AI처럼 보이는지 한 문장), rewrite(뜻·사실·인용 (저자, 연도)는 그대로 두고, 연구자가 직접 쓴 것처럼 "
+            "구체적이고 자연스러운 한국어 학술 문장으로 고친 것. 없는 사실·수치를 더하지 마세요).",
+            system="당신은 한국어 학술 글쓰기 교정 전문가입니다. 기계적인 문체를 사람의 문체로 다듬는 일을 돕습니다.",
+            schema=AITONE_SCHEMA,
+            num_ctx=8192,
+            num_predict=2600,
+            temperature=0.3,
+        )
+        for x in r.get("items", []):
+            k = (x.get("id") or "").strip().upper()
+            sc = max(0, min(100, int(x.get("score") or 0)))
+            if k in byid and sc >= 40 and x.get("sentence"):
+                found.append({"id": k, "sentence": x["sentence"], "score": sc, "label": "AI" if sc >= 70 else "의심",
+                              "patterns": x.get("patterns", []), "reason": x.get("reason", ""), "rewrite": x.get("rewrite", "")})
+    for f in found:
+        _add_note(byid[f["id"]], {"sev": "중요" if f["label"] == "AI" else "보통", "cat": "AI 문체",
+                                  "issue": f"[AI {f['score']}%] “{f['sentence'][:80]}” — {f['reason']}", "fix": f["rewrite"], "q": ""})
+    save(pid, soup)
+    total = sum(len(t) for _, _, t in paras) or 1
+    ai_chars = sum(len(f["sentence"]) for f in found if f["label"] == "AI")
+    sus_chars = sum(len(f["sentence"]) for f in found if f["label"] == "의심")
+    data = {"items": sorted(found, key=lambda f: -f["score"]), "stats": stats,
+            "ai_pct": round(ai_chars / total * 100), "sus_pct": round(sus_chars / total * 100)}
+    save_report(pid, "aitone", data,
+                f"AI 문체 점검: AI로 보이는 문장 {sum(f['label'] == 'AI' for f in found)}개({data['ai_pct']}%) · 의심 {sum(f['label'] == '의심' for f in found)}개({data['sus_pct']}%) — 원고 옆 💬 메모에 수정안", log)
+
+
+TOOLS["aitone"] = ai_tone

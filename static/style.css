@@ -301,3 +301,9 @@ textarea.pn-resp { width: 100%; margin-top: 6px; font-size: 13px; }
 .jn-bar span { display: block; height: 100%; background: var(--accent); border-radius: 3px; }
 .row select, select.small { width: auto; flex: 0 0 auto; }
 .ask-ans, .intro-prev { min-height: 0 !important; }
+
+/* AI 문체 점검 */
+.at-meter { margin-top: 8px; }
+.at-bar { display: flex; height: 10px; border-radius: 5px; overflow: hidden; background: var(--accent-soft); margin-bottom: 4px; }
+.at-ai { background: var(--warn); } .at-sus { background: #c98a00; }
+.at-fix { margin-top: 4px; }
