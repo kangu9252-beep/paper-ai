@@ -370,7 +370,9 @@ async def import_into(pid: int, file: UploadFile | None = File(None), text: str 
 
 
 @app.post("/api/projects/{pid}/review/{tool}")
-def run_review(pid: int, tool: str):
+def run_review(pid: int, tool: str, target: str = ""):
+    if tool == "panel" and target:
+        matrix._save_report(pid, "panel_target", target)
     if tool != "full" and tool not in review.TOOLS:
         raise HTTPException(404)
     fn = review.full_review if tool == "full" else review.TOOLS[tool]
@@ -432,6 +434,27 @@ def meter(pid: int, d: dict = Body(...)):
     return {"job": Job("meter", lambda j: explore.meter(pid, q, j.say, j.stop), llm.engine_for(pid), pid, "meter").id}
 
 
+@app.post("/api/projects/{pid}/journals")
+def journals(pid: int):
+    return {"job": Job("journals", lambda j: explore.journals(pid, j.say, j.stop), llm.engine_for(pid), pid, None).id}
+
+
+@app.post("/api/projects/{pid}/ask")
+def ask(pid: int, d: dict = Body(...)):
+    q = (d.get("question") or "").strip()
+    if len(q) < 4:
+        raise HTTPException(400, "질문을 적어주세요")
+    scope = "matrix" if d.get("scope") == "matrix" else "library"
+    return {"job": Job("ask", lambda j: explore.ask(pid, q, scope, j.say, j.stop), llm.engine_for(pid), pid, "ask").id}
+
+
+@app.get("/api/projects/{pid}/refs.ris")
+def refs_ris(pid: int):
+    from fastapi.responses import Response
+
+    return Response(explore.ris(pid), media_type="application/x-research-info-systems", headers={"Content-Disposition": f"attachment; filename=refs_{pid}.ris"})
+
+
 @app.post("/api/explain")
 def explain(d: dict = Body(...)):
     pid = d.get("project_id")
@@ -452,6 +475,12 @@ def model_save(pid: int, d: dict = Body(...)):
 @app.get("/api/projects/{pid}/ai_usage")
 def ai_usage(pid: int):
     return review.ai_usage(pid)
+
+
+@app.post("/api/projects/{pid}/panel/respond")
+def panel_respond(pid: int, d: dict = Body(...)):
+    resp = {str(k): v for k, v in (d.get("responses") or {}).items()}
+    return {"job": Job("review", lambda j: review.panel_respond(pid, resp, j.say, j.stop), llm.engine_for(pid), pid, "panel_respond").id}
 
 
 @app.post("/api/projects/{pid}/insert")

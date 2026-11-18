@@ -423,7 +423,7 @@ async function renderMatrix() {
       <p class="small muted">선행연구마다 목적·대상·변인·측정도구·분석 방법·결과·한계를 정리해요. 모든 칸에 원문 근거가 달려 있어요. (한 편에 Claude 20~30초, 로컬 AI 1~2분)</p>
       <div class="row"><button class="primary" id="mxPick" ${mj ? "disabled" : ""}>＋ 논문 골라 정리하기</button>
         ${sug.length ? `<button id="mxSug" ${mj ? "disabled" : ""}>원고에 인용된 논문 ${sug.length}편 한꺼번에 정리</button>` : ""}
-        <span class="grow"></span>${d.rows.length ? `<a class="btnlink ghostlink" href="/api/projects/${p.id}/matrix.csv">⬇ 엑셀로 내려받기 (CSV)</a>` : ""}</div>
+        <span class="grow"></span>${d.rows.length ? `<a class="btnlink ghostlink" href="/api/projects/${p.id}/matrix.csv">⬇ 엑셀로 내려받기 (CSV)</a><a class="btnlink ghostlink" href="/api/projects/${p.id}/refs.ris" title="Zotero·EndNote·Mendeley에서 '가져오기'로 여세요">⬇ Zotero·EndNote로 (RIS)</a>` : ""}</div>
       ${logBox("matrix")}
       <div id="mxPicker" class="mx-picker" style="display:none"></div>
       ${table}</div>
@@ -438,6 +438,11 @@ async function renderMatrix() {
       ${it ? `<div class="rv-sum">근거 확인 ${it.ok}문장 · 확인 필요(?) ${it.need}문장 · ${esc(it.ran_at)} · ${eng(it)}</div>
         <div class="paper intro-prev">${it.html}</div>
         <div class="row" style="margin-top:8px"><button class="primary" id="mxIns">④ 집필 원고 맨 앞에 넣기</button><button id="mxInsEnd">맨 뒤에 넣기</button></div>` : ""}</div>
+    <div class="card"><h3>📖 내 자료에 묻기</h3>
+      <p class="small muted" style="margin:2px 0 8px">내 PDF들에 무엇이든 물어보세요. 답의 문장마다 원문 근거를 찾아 달고, 근거가 없으면 '?'를 달아요. (예: "대인관계 유능성을 측정한 척도는 무엇이 있나?")</p>
+      <div class="row"><input id="akQ" class="grow" placeholder="질문을 적으세요"><select id="akScope"><option value="library">내 자료 전체</option><option value="matrix" ${d.rows.length ? "selected" : ""}>문헌분석표 논문만</option></select>
+        <button class="primary" id="akGo" ${!mj ? "" : "disabled"}>묻기</button></div>
+      ${logBox("ask")}${askHtml(rep.ask)}</div>
     <div class="card"><h3>⚖ 근거 저울</h3>
       <p class="small muted" style="margin:2px 0 8px">"진지한 여가는 삶의 질을 높이는가?"처럼 질문하면 표의 논문들이 각각 예·일부·아니오 중 무엇으로 답하는지 원문 근거와 함께 보여줘요. 결과가 엇갈리는 지점이 논의·연구 공백의 재료가 돼요.</p>
       <div class="row"><input id="mtQ" class="grow" placeholder="예) 진지한 여가 수준이 높을수록 삶의 질이 높은가?"><button class="primary" id="mtGo" ${d.rows.length && !mj ? "" : "disabled"}>물어보기</button></div>
@@ -445,6 +450,9 @@ async function renderMatrix() {
     <div class="card"><div class="row"><h3 class="grow">🕸 연구 지도</h3><button class="primary" id="mapGo" ${d.rows.length >= 2 && !mj ? "" : "disabled"}>관련 논문 찾기</button></div>
       <p class="small muted" style="margin:2px 0 8px">표의 논문들이 <b>공통으로 인용한 핵심 문헌</b>(꼭 읽어야 할 고전)과, 표의 논문들을 <b>인용한 최근 연구</b>(최근 6년)를 인용 관계로 찾아요. 여러 편과 연결될수록 내 주제와 가까워요. (국내 학술지는 인용 정보가 빠진 경우가 많아요)</p>
       ${logBox("map")}${mapHtml(rep.map)}</div>
+    <div class="card"><div class="row"><h3 class="grow">🎯 투고 학술지 추천</h3><button class="primary" id="jnGo" ${!mj ? "" : "disabled"}>학술지 찾기</button></div>
+      <p class="small muted" style="margin:2px 0 8px">표의 논문이 실린 학술지와, 내 주제와 비슷한 최근 6년 논문이 많이 실린 학술지를 모아 순위를 매겨요. KCI 등재 여부와 투고 규정은 각 학술지 누리집에서 꼭 확인하세요.</p>
+      ${logBox("journals")}${journalHtml(rep.journals)}</div>
     <div class="card"><div class="row"><h3 class="grow">🗺 연구모형 그림</h3><button id="mdAi" ${!mj ? "" : "disabled"}>AI로 변인 채우기</button></div>
       <p class="small muted" style="margin:2px 0 8px">변인 이름을 적으면 연구모형 그림을 바로 그려요. 쉼표(,)로 여러 개를 적을 수 있어요. 그림 파일(PNG·SVG)로 내려받아 한글·워드·PPT에 넣으세요.</p>
       ${logBox("model")}
@@ -508,6 +516,14 @@ async function renderMatrix() {
     go("meter", `/api/projects/${p.id}/meter`, { question: q }, "근거 저울")();
   };
   $("#mapGo").onclick = go("map", `/api/projects/${p.id}/map`, null, "연구 지도");
+  $("#jnGo").onclick = go("journals", `/api/projects/${p.id}/journals`, null, "투고 학술지 추천");
+  $("#akGo").onclick = () => {
+    const q = $("#akQ").value.trim();
+    if (q.length < 4) return toast("질문을 적어주세요");
+    go("ask", `/api/projects/${p.id}/ask`, { question: q, scope: $("#akScope").value }, "내 자료에 묻기")();
+  };
+  $("#akQ").onkeydown = (e) => { if (e.key === "Enter") $("#akGo").click(); };
+  $$(".ask-ans .cite[data-chunk]", body).forEach((c) => (c.onclick = () => showEvidence(c)));
   $("#mdAi").onclick = go("model", `/api/projects/${p.id}/model_suggest`, null, "연구모형 변인 정리");
   $$(".mt-ev, .mx-ev2", body).forEach((x) => (x.onclick = (ev) => { ev.stopPropagation(); showEvidence({ chunk: x.dataset.chunk, quote: x.dataset.quote }); }));
   $$("[data-mapget]", body).forEach((b) => (b.onclick = async () => {
@@ -558,6 +574,21 @@ async function renderMatrix() {
     toast("서론 초안을 원고에 넣었어요 — ④ 집필에서 다듬어 주세요");
   };
   if (it) { $("#mxIns").onclick = insert(true); $("#mxInsEnd").onclick = insert(false); }
+}
+
+function askHtml(hist) {
+  if (!hist || !hist.length) return "";
+  const one = (h) => `<div class="mt-q"><b>Q.</b> ${esc(h.question)} <span class="small muted">· ${h.scope === "matrix" ? "문헌분석표" : "내 자료 전체"} · 근거 확인 ${h.ok} · 확인 필요 ${h.need} · ${esc(h.ran_at)}</span></div>
+    <div class="paper ask-ans">${h.html}</div>`;
+  return one(hist[0]) + (hist.length > 1 ? `<details class="small" style="margin-top:8px"><summary>이전 질문 ${hist.length - 1}개</summary>${hist.slice(1).map(one).join("")}</details>` : "");
+}
+
+function journalHtml(j) {
+  if (!j || !j.items) return "";
+  const max = Math.max(...j.items.map((x) => x.score), 1);
+  return `<div class="rv-sum">${esc(j.ran_at)} · 검색어: ${esc(j.query)}</div>` + j.items.map((x, i) => `<div class="rv-item"><b>${i + 1}. ${esc(x.venue)}</b>
+    <div class="jn-bar"><span style="width:${(x.score / max) * 100}%"></span></div>
+    <div class="small muted">${x.examples.map((t) => esc(t)).join(" · ")}</div></div>`).join("");
 }
 
 function meterHtml(hist, num) {
@@ -1112,11 +1143,13 @@ async function scheduleNight(kind, args) {
 }
 
 const TOOL_INFO = [
+  ["panel", "⓪ 심사위원 3인 모의 심사", "방법론 전문가·이론 전문가·지도교수형 심사위원 3명이 각자 심사한 뒤 서로 토론하고 최종 판정(통과/조건부 통과/수정 후 재심/불통과)을 내려요. 수정 요구마다 답변서를 쓰면 재심사를 받을 수 있어요. (Claude 3~5분 권장)"],
   ["structure", "⓪ 예비심사 리뷰", "지도교수·심사위원의 눈으로 읽어요 — 논문이 일목요연한지(연구문제 → 선행연구 → 방법 → 결과 → 결론이 한 줄기인지), 연구문제에 결론이 답하는지 보고, 심사에서 나올 비판과 고칠 점을 제안해요. 원고 옆에 💬 메모로도 달려요."],
   ["cites", "② 인용 전체 점검", "원고 속 (저자, 연도)를 모두 찾아 근거를 확인해요 — ✔ 확인 · ⚠ 원문과 다를 수 있음 · ? 근거 없음. 인용이 많으면 오래 걸려요."],
   ["uncited", "③ 근거 없는 문장 찾기", "인용 없이 주장하는 문장에 '출처 필요'를 달고, 내 자료에서 근거를 추천해요. (연구방법·결과 장은 제외)"],
   ["discuss", "④ 논의 보강", "결과 장에서 핵심 결과를 뽑아 일치하는 연구·상반되는 연구를 찾고, 논의에 쓸 문장을 제안해요."],
   ["recent", "⑤ 최신 연구 찾기", "최근 3년 사이 나온 관련 논문 중 원고에 아직 없는 것을 찾아, 원고 어디에 쓰면 좋을지 알려줘요."],
+  ["style", "⑦ 문장 다듬기", "교정자처럼 문장을 점검해요 — 비문·호응, 시제·어미(계획서는 '~할 것이다'), '완벽하게·입증한다' 같은 과장 표현, 중복, 구어체, 용어 일관성. 고친 예시와 함께 원고 옆 💬 메모로 달려요."],
   ["refs", "⑥ 참고문헌 대조", "본문 인용과 참고문헌 목록을 맞춰봐요 — 목록에 없는 인용 · 연도가 다른 것 · 본문에서 안 쓰인 문헌. (몇 초)"],
 ];
 const TOOL_NAME = Object.fromEntries(TOOL_INFO.map(([k, t]) => [k, t.slice(2)]));
@@ -1134,6 +1167,27 @@ function reportHtml(k, rep) {
   const d = rep.data;
   let h = `<div class="rv-sum">${esc(rep.summary)} <span class="muted small">· ${esc(rep.ran_at)} · ${rep.engine === "claude" ? "Claude" : "로컬 AI"}</span></div>`;
   const st = { ok: "✔", warn: "⚠", need: "?" };
+  if (k === "style" && Array.isArray(d) && d.length) {
+    h += d.map((it) => `<div class="rv-item warn" data-para="${esc(it.id)}" style="cursor:pointer"><span class="badge gray">${esc(it.category)}</span> <span class="small muted">${esc(it.id)}</span> “${esc(it.excerpt)}”
+      <div class="small">${esc(it.problem)}</div>${it.fix ? `<div class="small">✏ ${esc(it.fix)}</div>` : ""}</div>`).join("");
+  }
+  if (k === "panel" && d && d.reviews) {
+    const vc = { 통과: "ok", "조건부 통과": "ok", "수정 후 재심": "warn", 불통과: "need" };
+    const sc = { 해결: "ok", "부분 해결": "warn", 미해결: "need" };
+    h += `<div class="pn-verdict ${vc[d.verdict] || ""}"><div class="small muted">${esc(d.target)} · ${d.round}차 판정</div><b>${esc(d.verdict)}</b><div class="small">${esc(d.verdict_reason)}</div></div>`;
+    h += `<details class="small" style="margin-top:8px"><summary>세 심사위원의 독립 심사 보기</summary>${d.reviews.map((rv) => `<div class="rv-item"><b>${esc(rv.name)}</b> <span class="muted">${esc(rv.role)}</span> <span class="badge rq-${vc[rv.decision] || "warn"}">${esc(rv.decision)}</span>
+      <div>${esc(rv.summary)}</div>${(rv.strengths || []).length ? `<div class="muted">강점: ${esc(rv.strengths.join(" · "))}</div>` : ""}
+      ${(rv.concerns || []).map((c) => `<div>• <span class="badge sev-${esc(c.severity)}">${esc(c.severity)}</span> <span class="muted">${esc(c.where)}</span> ${esc(c.issue)} <span class="muted">→ ${esc(c.request)}</span></div>`).join("")}</div>`).join("")}</details>`;
+    if (d.agreements.length) h += `<div class="small muted" style="margin-top:8px">세 사람이 공통으로 지적한 점</div>${d.agreements.map((x) => `<div class="rv-item warn">${esc(x)}</div>`).join("")}`;
+    if (d.disagreements.length) h += `<div class="small muted" style="margin-top:8px">의견이 갈린 쟁점</div>${d.disagreements.map((x) => `<div class="rv-item"><b>${esc(x.issue)}</b>
+      <div class="small">① ${esc(x.r1)}<br>② ${esc(x.r2)}<br>③ ${esc(x.r3)}</div><div class="small"><b>위원회 정리:</b> ${esc(x.resolution)}</div></div>`).join("")}`;
+    h += `<div class="small muted" style="margin-top:8px">수정 요구와 답변서 (답을 적고 '재심사 받기'를 누르세요)</div>` + d.required.map((it) => `<div class="rv-item ${sc[it.status] || ""}">
+      <b>${it.id}.</b> ${esc(it.issue)} <span class="small muted">(심사위원 ${esc((it.by || []).join(", "))})</span>${it.status ? ` <span class="badge rq-${sc[it.status]}">${esc(it.status)}</span>` : ""}
+      <div class="small muted">${esc(it.why)}</div>
+      ${it.comment ? `<div class="small"><b>재심 의견:</b> ${esc(it.comment)}</div>` : ""}
+      ${it.status === "해결" ? `<div class="small muted">내 답변: ${esc(it.response)}</div>` : `<textarea class="pn-resp" data-resp="${it.id}" rows="2" placeholder="어떻게 고쳤는지, 또는 왜 고치지 않는지 적어주세요">${esc(it.response || "")}</textarea>`}</div>`).join("");
+    if (d.required.some((it) => it.status !== "해결")) h += `<div class="row" style="margin-top:6px"><button class="primary" id="pnRespond">답변 제출하고 재심사 받기</button><span class="small muted">원고를 고친 뒤 받으면 수정 내용까지 확인해요</span></div>`;
+  }
   if (k === "structure" && d && d.skeleton) {
     const go = (pp) => pp ? `<button class="small ghost" data-para="${esc(pp)}">원고에서 보기</button>` : "";
     h += `<div class="sv-thread"><div class="small muted">이 논문의 한 줄기</div><b>${esc(d.thread)}</b><div class="small" style="margin-top:6px">${esc(d.verdict)}</div></div>`;
@@ -1205,6 +1259,7 @@ async function renderReview() {
   const mine = sched.rows.filter((r) => r.project_id === p.id && r.status !== "done").slice(0, 10);
   const rj = reviewJob[p.id];
   const card = ([k, t, d]) => `<div class="card" id="tool-${k}"><div class="row"><h3 class="grow">${t}</h3>
+      ${k === "panel" ? `<select id="pnTarget" class="small">${["학위논문 예비심사", "학위논문 본심사", "KCI 학술지 투고", "SSCI 학술지 투고"].map((t) => `<option ${(p.reports?.panel?.data?.target || "학위논문 예비심사") === t ? "selected" : ""}>${t}</option>`).join("")}</select>` : ""}
       <button class="small" data-night="${k}" ${has ? "" : "disabled"}>🌙 새벽 예약</button>
       <button class="small primary" data-run="${k}" ${has && !rj ? "" : "disabled"}>지금 실행</button></div>
       <p class="small muted" style="margin:2px 0 8px">${d}</p>
@@ -1273,6 +1328,22 @@ async function renderReview() {
   // 결과에서 원고로 이동
   $$(".rv-item[data-cid]", body).forEach((d) => (d.onclick = () => { S.focusCid = d.dataset.cid; S.tab = "write"; renderProject(); }));
   $$("[data-para]", body).forEach((d) => (d.onclick = () => { S.focusPara = d.dataset.para; S.tab = "write"; renderProject(); }));
+  if ($("#pnRespond")) $("#pnRespond").onclick = async () => {
+    const responses = Object.fromEntries($$(".pn-resp", body).map((t) => [t.dataset.resp, t.value]));
+    if (!Object.values(responses).some((v) => v.trim())) return toast("답변을 하나 이상 적어주세요");
+    await saveNow();
+    const { job } = await api(`/api/projects/${p.id}/panel/respond`, { json: { responses } });
+    reviewJob[p.id] = { job, tool: "panel" };
+    renderReview();
+    runJob(job, "재심사", {
+      logEl: "rvlog-panel",
+      onDone: async (r, j) => {
+        delete reviewJob[p.id];
+        if (S.cur?.id === p.id) { S.cur = await api(`/api/projects/${p.id}`); if (S.tab === "review") renderReview(); }
+        if (j.status === "done") toast("재심사 완료");
+      },
+    });
+  };
   $$("[data-ev]", body).forEach((b) => (b.onclick = () => showEvidence({ chunk: b.dataset.ev, quote: b.dataset.q })));
   $$("[data-ins]", body).forEach((b) => (b.onclick = async () => {
     const [fi, rel, ri] = b.dataset.ins.split("-");
@@ -1314,7 +1385,8 @@ async function loadAiUse(p) {
 async function runReview(tool) {
   const p = S.cur;
   await saveNow();
-  const { job } = await api(`/api/projects/${p.id}/review/${tool}`, { method: "POST" });
+  const q = tool === "panel" && $("#pnTarget") ? `?target=${encodeURIComponent($("#pnTarget").value)}` : "";
+  const { job } = await api(`/api/projects/${p.id}/review/${tool}${q}`, { method: "POST" });
   reviewJob[p.id] = { job, tool };
   renderReview();
   const title = tool === "full" ? "원고 전체 검토" : TOOL_NAME[tool];

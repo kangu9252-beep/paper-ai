@@ -579,7 +579,7 @@ def _para_blocks(soup):
         for b in bl:
             if "ai-note" in (b.get("class") or []):
                 continue
-            t = _clean(b.get_text(" ", strip=True))
+            t = _clean(re.sub(r"\s+", " ", b.get_text("")).strip())  # 인용 표시 앞뒤 공백을 원고 그대로 (넣지도 빼지도 않음)
             if len(t) < 25:
                 continue
             n += 1
@@ -814,6 +814,11 @@ FEATURES = {
     "meter": ("근거 저울(연구 결과 비교)", "lit"),
     "explain": ("원문 쉽게 설명·번역", "lit"),
     "model": ("연구모형 변인 정리", "struct"),
+    "panel": ("심사위원 3인 모의 심사", "struct"),
+    "panel_respond": ("모의 심사 재심사", "struct"),
+    "style": ("문장 다듬기(교정)", "struct"),
+    "journals": ("투고 학술지 추천", "lit"),
+    "ask": ("내 자료에 묻기", "lit"),
 }
 PURPOSE = {
     "lit": ("선행연구 탐색과 정리", "literature search and organization"),
@@ -857,3 +862,245 @@ def ai_usage(pid):
         + "The author is fully responsible for the study design, data analysis and interpretation, and the content of the final manuscript."
     )
     return {"rows": rows, "drafts": drafts, "ko": ko, "en": en}
+
+
+# ---------- 심사위원 3인 모의 심사 · 답변서 · 재심사 ----------
+VERDICTS = ["통과", "조건부 통과", "수정 후 재심", "불통과"]
+REVIEW_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "summary": {"type": "string"},
+        "strengths": {"type": "array", "items": {"type": "string"}},
+        "concerns": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "severity": {"type": "string", "enum": ["중요", "보통", "사소"]},
+                    "where": {"type": "string"},
+                    "issue": {"type": "string"},
+                    "request": {"type": "string"},
+                },
+                "required": ["severity", "where", "issue", "request"],
+            },
+        },
+        "decision": {"type": "string", "enum": VERDICTS},
+    },
+    "required": ["summary", "strengths", "concerns", "decision"],
+}
+DEBATE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "agreements": {"type": "array", "items": {"type": "string"}},
+        "disagreements": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {"issue": {"type": "string"}, "r1": {"type": "string"}, "r2": {"type": "string"}, "r3": {"type": "string"}, "resolution": {"type": "string"}},
+                "required": ["issue", "r1", "r2", "r3", "resolution"],
+            },
+        },
+        "verdict": {"type": "string", "enum": VERDICTS},
+        "verdict_reason": {"type": "string"},
+        "required": {
+            "type": "array",
+            "items": {"type": "object", "properties": {"issue": {"type": "string"}, "by": {"type": "array", "items": {"type": "integer"}}, "why": {"type": "string"}}, "required": ["issue", "by", "why"]},
+        },
+    },
+    "required": ["agreements", "disagreements", "verdict", "verdict_reason", "required"],
+}
+PANEL_ROLES = [
+    ("심사위원 1", "연구방법·통계 전문가", "연구 설계, 표본, 측정도구의 타당도·신뢰도, 분석 방법이 연구문제에 맞는지, 결과 해석이 자료를 넘어서지 않는지를 가장 엄격하게 봅니다."),
+    ("심사위원 2", "이 주제 분야의 이론 전문가", "이론적 배경이 탄탄한지, 선행연구와 무엇이 다른지(독창성), 변인 간 관계의 이론적 근거, 학문적·실천적 기여를 봅니다."),
+    ("심사위원 3", "지도교수형 심사위원", "논문이 일목요연한지(연구문제→선행연구→방법→결과→결론이 한 줄기인지), 학위논문 요건과 형식, 연구자가 디펜스할 수 있는지를 봅니다."),
+]
+
+
+def _manuscript_text(pid, soup):
+    secs = _para_blocks(soup)
+    full = "\n\n".join(f"## {t}\n" + "\n".join(f"{k}: {x}" for k, _, x in ps) for t, ps in secs if ps)
+    if llm.engine() == "claude":
+        return full[:110000]
+    row = db.q("SELECT reports FROM projects WHERE id=?", (pid,), one=True) or {}
+    sk = (json.loads(row.get("reports") or "{}").get("structure") or {}).get("data", {}).get("skeleton")
+    if sk:  # 로컬 AI는 긴 원고를 다 못 읽으므로 예비심사 리뷰의 뼈대를 쓴다
+        return "\n".join(f"## {s['title']} — {s['claim']}\n" + "\n".join(f"  {x['id']}: {x['topic']}" for x in s["paras"]) for s in sk)[:9000]
+    return full[:7000]
+
+
+def panel_review(pid, log, stop=lambda: False):
+    p, soup = load(pid)
+    rep = json.loads(p.get("reports") or "{}")
+    target = rep.get("panel_target") or "학위논문 예비심사"
+    text = _manuscript_text(pid, soup)
+    save(pid, soup)  # 문단 번호(data-rv) 저장
+    if len(text) < 300:
+        save_report(pid, "panel", {}, "심사할 원고가 너무 짧아요.", log)
+        return
+    topic = p.get("topic") or p.get("title") or ""
+    reviews = []
+    for i, (name, role, focus) in enumerate(PANEL_ROLES):
+        if stop():
+            return
+        log(f"[{i + 1}/3] {name}({role}) 심사 중…")
+        r = llm.chat(
+            f"심사 종류: {target}\n논문 주제: {topic}\n\n[원고 (문단마다 P번호)]\n{text}\n\n"
+            f"당신은 {name}, {role}입니다. {focus} 다른 심사위원과 상의하지 말고 독립적으로 심사하세요.\n"
+            "- summary: 이 원고에 대한 총평 2~3문장\n- strengths: 강점 1~3개\n"
+            "- concerns: 지적사항 4~8개. where(P번호나 장 이름), issue(문제), request(연구자에게 요구하는 수정)\n"
+            "- decision: 통과/조건부 통과/수정 후 재심/불통과\n"
+            "원고가 결과가 없는 연구계획서라면 결과·결론이 없다는 것 자체는 지적하지 마세요. 근거 없이 칭찬하지 마세요.",
+            system=f"당신은 {target}을 여러 번 맡아 본 {role}입니다. 엄격하지만 연구자가 성장하도록 구체적으로 씁니다. 한국어로 답합니다.",
+            schema=REVIEW_SCHEMA,
+            num_ctx=12288,
+            num_predict=2200,
+            temperature=0.4,
+        )
+        reviews.append({"name": name, "role": role, **{k: r.get(k) for k in REVIEW_SCHEMA["properties"]}})
+    if stop():
+        return
+    log("세 심사위원이 의견을 나누고 최종 판정하는 중…")
+    block = "\n\n".join(
+        f"[{rv['name']} · {rv['role']}] 판정: {rv['decision']}\n총평: {rv['summary']}\n"
+        + "\n".join(f"- ({c['severity']}, {c['where']}) {c['issue']} → {c['request']}" for c in rv["concerns"] or [])
+        for rv in reviews
+    )
+    d = llm.chat(
+        f"심사 종류: {target}\n논문 주제: {topic}\n\n[세 심사위원의 독립 심사]\n{block}\n\n"
+        "심사위원장으로서 세 심사위원의 토론을 정리하세요.\n"
+        "- agreements: 세 사람이 공통으로 지적한 점\n"
+        "- disagreements: 의견이 갈린 쟁점마다 r1, r2, r3의 입장(한 문장씩, 해당 없으면 의견 없음)과 resolution(위원회의 정리)\n"
+        "- verdict: 최종 판정(통과/조건부 통과/수정 후 재심/불통과), verdict_reason: 이유 2문장\n"
+        "- required: 연구자가 반드시 고쳐야 할 수정 요구 4~10개 (겹치는 지적은 합치고, by에 제기한 심사위원 번호 1~3)",
+        system="당신은 공정한 심사위원장입니다. 한국어로 답합니다.",
+        schema=DEBATE_SCHEMA,
+        num_ctx=12288,
+        num_predict=2200,
+    )
+    req = [{"id": i + 1, "issue": x.get("issue", ""), "by": x.get("by", []), "why": x.get("why", ""), "response": "", "status": "", "comment": ""}
+           for i, x in enumerate(d.get("required", []))]
+    data = {"target": target, "reviews": reviews, "agreements": d.get("agreements", []), "disagreements": d.get("disagreements", []),
+            "verdict": d.get("verdict", ""), "verdict_reason": d.get("verdict_reason", ""), "required": req, "round": 1, "history": []}
+    save_report(pid, "panel", data, f"모의 심사({target}): 최종 판정 '{data['verdict']}' · 수정 요구 {len(req)}개 — 답변서를 쓰면 재심사를 받을 수 있어요", log)
+
+
+RESPOND_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "items": {"type": "array", "items": {"type": "object", "properties": {"id": {"type": "integer"}, "status": {"type": "string", "enum": ["해결", "부분 해결", "미해결"]}, "comment": {"type": "string"}}, "required": ["id", "status", "comment"]}},
+        "verdict": {"type": "string", "enum": VERDICTS},
+        "verdict_reason": {"type": "string"},
+    },
+    "required": ["items", "verdict", "verdict_reason"],
+}
+
+
+def panel_respond(pid, responses, log, stop=lambda: False):
+    p, soup = load(pid)
+    rep = json.loads(p.get("reports") or "{}")
+    pn = (rep.get("panel") or {}).get("data")
+    if not pn or not pn.get("required"):
+        raise RuntimeError("먼저 모의 심사를 받아 주세요.")
+    for it in pn["required"]:
+        it["response"] = (responses.get(str(it["id"])) or it.get("response") or "").strip()
+    todo = [it for it in pn["required"] if it["status"] != "해결"]
+    if not any(it["response"] for it in todo):
+        raise RuntimeError("답변을 하나 이상 적어 주세요.")
+    text = _manuscript_text(pid, soup)
+    log(f"재심사 중 (수정 요구 {len(todo)}개)…")
+    block = "\n\n".join(f"[{it['id']}] 수정 요구: {it['issue']}\n    연구자 답변: {it['response'] or '(답변 없음)'}" for it in todo)
+    r = llm.chat(
+        f"심사 종류: {pn['target']}\n\n[지난 심사의 수정 요구와 연구자의 답변]\n{block}\n\n[수정된 원고]\n{text}\n\n"
+        "심사위원회로서 재심사하세요. 각 항목마다 status(해결/부분 해결/미해결)와 comment(왜 그렇게 판단했는지, 남은 요구가 있으면 구체적으로). "
+        "답변만 하고 원고에 반영하지 않았으면 부분 해결 이하로 보세요. 수정하지 않는 이유를 설득력 있게 설명했다면 해결로 볼 수 있습니다. "
+        "마지막으로 verdict(최종 판정)와 verdict_reason(2문장).",
+        system="당신은 공정하지만 엄격한 심사위원장입니다. 한국어로 답합니다.",
+        schema=RESPOND_SCHEMA,
+        num_ctx=12288,
+        num_predict=1800,
+    )
+    st = {int(x["id"]): x for x in r.get("items", []) if str(x.get("id", "")).isdigit()}
+    pn["history"].append({"round": pn["round"], "verdict": pn["verdict"], "required": [dict(it) for it in pn["required"]]})
+    for it in todo:
+        if it["id"] in st:
+            it["status"], it["comment"] = st[it["id"]].get("status", ""), st[it["id"]].get("comment", "")
+    pn["round"] += 1
+    pn["verdict"], pn["verdict_reason"] = r.get("verdict", pn["verdict"]), r.get("verdict_reason", "")
+    done = sum(1 for it in pn["required"] if it["status"] == "해결")
+    save_report(pid, "panel", pn, f"재심사 {pn['round'] - 1}차: 판정 '{pn['verdict']}' · 해결 {done}/{len(pn['required'])}", log)
+
+
+TOOLS["panel"] = panel_review
+
+
+# ---------- 문장 다듬기 (비문·시제·과장·중복) ----------
+STYLE_CATS = ["비문·호응", "시제·어미", "과장·단정", "중복·장황", "구어체", "맞춤법·띄어쓰기", "용어 일관성"]
+STYLE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "items": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string"},
+                    "excerpt": {"type": "string"},
+                    "category": {"type": "string", "enum": STYLE_CATS},
+                    "problem": {"type": "string"},
+                    "fix": {"type": "string"},
+                },
+                "required": ["id", "excerpt", "category", "problem", "fix"],
+            },
+        }
+    },
+    "required": ["items"],
+}
+
+
+def style_check(pid, log, stop=lambda: False):
+    p, soup = load(pid)
+    for el in soup.select("[data-review]"):  # 지난 문장 점검 메모만 지움 (심사 메모는 둠)
+        try:
+            notes = [n for n in json.loads(el["data-review"]) if n.get("cat") != "문장"]
+        except Exception:
+            notes = []
+        if notes:
+            el["data-review"] = json.dumps(notes, ensure_ascii=False)
+        else:
+            del el["data-review"]
+    secs = _para_blocks(soup)
+    paras = [(k, el, t) for title, ps in secs if not (title and SKIP_HEAD.search(title) and REF_HEAD.search(title)) for k, el, t in ps]
+    byid = {k: el for k, el, _ in paras}
+    plan = bool(re.search(r"계획|프로포절|proposal", (p.get("title") or "") + (p.get("topic") or "")))
+    found, step = [], 12
+    for i in range(0, len(paras), step):
+        if stop():
+            return
+        part = paras[i : i + step]
+        log(f"[{i // step + 1}/{(len(paras) + step - 1) // step}] 문장 점검 중…")
+        r = llm.chat(
+            "\n\n".join(f"{k}: {t[:1500]}" for k, _, t in part) + "\n\n"
+            "학위논문 원고의 문장을 교정자처럼 점검하세요. 분명한 문제만 고르세요(문단당 0~3개). "
+            "분류: " + ", ".join(STYLE_CATS) + ". "
+            + ("이 원고는 연구계획서라 아직 하지 않은 일은 '~할 것이다/~할 예정이다'로 써야 합니다. " if plan else "")
+            + "'완벽하게', '입증한다', '강력한'처럼 근거보다 센 표현, 같은 개념을 다른 용어로 부르는 것도 짚으세요.\n"
+            "각 항목: id(P번호), excerpt(문제 부분을 원문에서 그대로 10~40자), problem(무엇이 문제인지 한 문장), fix(고친 문장 예시).",
+            system="당신은 한국어 학술 논문 전문 교정자입니다. 원고의 내용은 바꾸지 않고 문장만 다듬습니다.",
+            schema=STYLE_SCHEMA,
+            num_ctx=8192,
+            num_predict=2000,
+        )
+        for x in r.get("items", []):
+            k = (x.get("id") or "").strip().upper()
+            if k in byid and x.get("problem"):
+                found.append({"id": k, "excerpt": x.get("excerpt", ""), "category": x.get("category", ""), "problem": x["problem"], "fix": x.get("fix", "")})
+    for f in found:
+        _add_note(byid[f["id"]], {"sev": "사소", "cat": "문장", "issue": f"[{f['category']}] “{f['excerpt']}” — {f['problem']}", "fix": f["fix"], "q": ""})
+    save(pid, soup)
+    cnt = {}
+    for f in found:
+        cnt[f["category"]] = cnt.get(f["category"], 0) + 1
+    save_report(pid, "style", found, "문장 다듬기: " + (" · ".join(f"{k} {v}" for k, v in cnt.items()) or "고칠 문장이 없어요") + " — 원고 옆 💬 메모로도 달았어요", log)
+
+
+TOOLS["style"] = style_check

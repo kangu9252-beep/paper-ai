@@ -288,3 +288,16 @@ table.mx tr.flash td { background: var(--accent-soft); }
 .md-form label { display: flex; flex-direction: column; font-size: 12px; color: var(--muted); gap: 3px; }
 .md-svg { overflow-x: auto; background: #fff; border: 1px solid var(--line); border-radius: 8px; padding: 8px; margin-bottom: 8px; }
 .explain { background: var(--accent-soft); border-radius: 8px; padding: 8px 10px; font-size: 13px; line-height: 1.6; display: flex; flex-direction: column; gap: 4px; }
+
+/* 3인 모의 심사 */
+.pn-verdict { border-left: 4px solid var(--line); background: var(--surface-2); padding: 10px 12px; border-radius: 0 8px 8px 0; margin-top: 8px; }
+.pn-verdict b { font-size: 18px; }
+.pn-verdict.ok { border-color: var(--accent); } .pn-verdict.warn { border-color: #c98a00; } .pn-verdict.need { border-color: var(--warn); }
+textarea.pn-resp { width: 100%; margin-top: 6px; font-size: 13px; }
+
+.ask-ans { padding: 12px 16px; border: 1px solid var(--line); border-radius: 8px; margin-top: 6px; font-size: 15px; }
+.ask-ans .cite { cursor: pointer; }
+.jn-bar { height: 6px; background: var(--surface-2); border-radius: 3px; margin: 4px 0; }
+.jn-bar span { display: block; height: 100%; background: var(--accent); border-radius: 3px; }
+.row select, select.small { width: auto; flex: 0 0 auto; }
+.ask-ans, .intro-prev { min-height: 0 !important; }

@@ -1,5 +1,6 @@
 """문헌분석 보조 도구: 연구 지도(인용 관계) · 근거 저울(연구들의 답 분포) · 원문 쉽게 설명 · 연구모형 변인 정리."""
 import datetime
+import html
 import difflib
 import json
 import re
@@ -227,3 +228,124 @@ def model_suggest(pid, log):
     )
     matrix._save_report(pid, "model", {k: r.get(k) for k in MODEL_SCHEMA["properties"]} | {"ran_at": now()})
     log("변인 정리 완료 — 그림에서 이름을 고칠 수 있어요")
+
+
+# ---------- 🎯 투고 학술지 추천 ----------
+def journals(pid, log, stop=lambda: False):
+    p = db.q("SELECT topic, title FROM projects WHERE id=?", (pid,), one=True)
+    rs = matrix.rows(pid)
+    counts, examples = {}, {}
+
+    def add(venue, title, w=1):
+        v = (venue or "").strip()
+        if len(v) < 3:
+            return
+        counts[v] = counts.get(v, 0) + w
+        examples.setdefault(v, [])
+        if title and len(examples[v]) < 3 and title not in examples[v]:
+            examples[v].append(title)
+
+    for r in rs:  # 표의 논문이 실린 학술지 (가중치 2)
+        x = db.q("SELECT venue, title FROM papers WHERE id=?", (r["paper_id"],), one=True) or {}
+        add(x.get("venue"), x.get("title"), 2)
+    rep = json.loads((db.q("SELECT reports FROM projects WHERE id=?", (pid,), one=True) or {}).get("reports") or "{}")
+    for w in (rep.get("map") or {}).get("later", []):
+        add(w.get("venue"), w.get("title"))
+    log("주제와 비슷한 최근 논문이 실린 학술지를 찾는 중…")
+    q = agent._en_query(p.get("topic") or p.get("title") or "")
+    year_from = datetime.date.today().year - 6
+    for w in web.openalex_search(q, n=50, year_from=year_from):
+        add(w.get("venue"), w.get("title"))
+    top = sorted(counts.items(), key=lambda kv: -kv[1])[:15]
+    data = {"query": q, "items": [{"venue": v, "score": c, "examples": examples.get(v, [])} for v, c in top], "ran_at": now()}
+    matrix._save_report(pid, "journals", data)
+    log(f"학술지 후보 {len(top)}개")
+
+
+# ---------- 📖 내 자료에 묻기 ----------
+def ask(pid, question, scope, log, stop=lambda: False):
+    ids = [r["paper_id"] for r in matrix.rows(pid)] if scope == "matrix" else None
+    if scope == "matrix" and not ids:
+        raise RuntimeError("문헌분석표가 비어 있어요. '내 자료 전체'로 물어보세요.")
+    if llm.embed(["확인"]) is None:
+        raise RuntimeError("근거를 찾는 로컬 검색 모델(Ollama)이 꺼져 있어요. 컴퓨터에서 Ollama를 켠 뒤 다시 눌러주세요.")
+    log("내 자료에서 관련 부분을 찾는 중…")
+    srcs = pdfindex.search(question, k=10, paper_ids=ids, per_paper=2)
+    if not srcs:
+        raise RuntimeError("관련된 내용을 내 자료에서 찾지 못했어요.")
+    block = "\n\n".join(f"[{i + 1}] {c['cite']}\n{c['text'][:700]}" for i, c in enumerate(srcs))
+    log("답을 쓰는 중…")
+    text = llm.chat(
+        f"[질문] {question}\n\n[내 자료에서 찾은 원문]\n{block}\n\n"
+        "위 원문만 근거로 질문에 한국어로 답하세요. 3~8문장, 한 줄에 한 문장. 원문에서 가져온 내용을 쓴 문장 끝에는 자료 번호를 붙이세요. 예) ~로 나타났다 [2].\n"
+        "원문에 답이 없으면 없다고 말하고, 여러 연구의 결과가 다르면 다르다고 쓰세요. 저자 이름이나 (저자, 연도)는 쓰지 말고 번호만.",
+        system=agent.SYS,
+        num_ctx=10240,
+        num_predict=1200,
+        temperature=0.2,
+    )
+    claims = agent.parse_claims(text)
+    pend = []
+    for sent, idx in claims:
+        if not (0 <= idx < len(srcs)):
+            pend.append((sent, None, []))
+            continue
+        c = srcs[idx]
+        opts = agent.split_sents(c["text"]) or [c["text"][:300]]
+        v = llm.embed([sent] + opts)
+        ranked = sorted(range(len(opts)), key=lambda i: -float(v[i + 1] @ v[0])) if v is not None else range(len(opts))
+        cand = []
+        for i in list(ranked)[:3]:
+            loc = pdfindex.locate(c["text"], opts[i])
+            a, b = (loc[0], loc[1]) if loc else (0, len(c["text"]))
+            cand.append((opts[i], c["text"][max(0, a - 350): b + 350]))
+        pend.append((sent, c, cand))
+    chosen = [None] * len(pend)
+    for t in range(3):  # 문맥으로 검증, 실패하면 다음 구절
+        todo = [i for i, (s, c, cand) in enumerate(pend) if c and chosen[i] is None and len(cand) > t]
+        if not todo:
+            break
+        for i, ok in zip(todo, agent.verify_batch([(pend[i][0], pend[i][2][t][1]) for i in todo])):
+            if ok:
+                chosen[i] = pend[i][2][t][0]
+    parts, n_ok, n_bad = [], 0, 0
+    for (sent, c, _), q in zip(pend, chosen):
+        end = "" if sent.endswith(("?", "!")) else "."
+        if c is None:
+            parts.append(html.escape(sent) + end)
+        elif q:
+            parts.append(f"{html.escape(sent)} {agent.cite_span(c, q)}{end}")
+            n_ok += 1
+        else:
+            parts.append(f"{html.escape(sent)} {agent.need_span(c['cite'])}{end}")
+            n_bad += 1
+    item = {"question": question, "scope": scope, "html": "<p>" + " ".join(parts) + "</p>", "ok": n_ok, "need": n_bad, "ran_at": now(), "engine": llm.engine()}
+    hist = json.loads((db.q("SELECT reports FROM projects WHERE id=?", (pid,), one=True) or {}).get("reports") or "{}").get("ask", [])
+    hist = [h for h in hist if h.get("question") != question][:9]
+    matrix._save_report(pid, "ask", [item] + hist)
+    log(f"답 완성 — 근거 확인 {n_ok}문장, 확인 필요 {n_bad}문장")
+
+
+# ---------- 📤 참고문헌 내보내기 (Zotero·EndNote·Mendeley용 RIS) ----------
+def ris(pid):
+    rs = matrix.rows(pid)
+    ids = [r["paper_id"] for r in rs] + [c["id"] for c in matrix.candidates(pid) if c["suggested"]]
+    seen, out = set(), []
+    for i in ids:
+        if i in seen:
+            continue
+        seen.add(i)
+        p = db.q("SELECT title, authors, year, doi, venue FROM papers WHERE id=?", (i,), one=True)
+        if not p:
+            continue
+        out.append("TY  - JOUR")
+        for a in json.loads(p["authors"] or "[]"):
+            out.append(f"AU  - {a}")
+        out += [f"TI  - {p['title'] or ''}", f"PY  - {p['year'] or ''}"]
+        if p.get("venue"):
+            out.append(f"JO  - {p['venue']}")
+        if p.get("doi"):
+            out.append(f"DO  - {p['doi']}")
+        out.append("ER  - ")
+        out.append("")
+    return "\n".join(out)
