@@ -28,6 +28,7 @@ class Job:
         self.id = uuid.uuid4().hex[:10]
         self.kind, self.status, self.log, self.result, self.emitted, self.stopped = kind, "running", [], None, [], False
         JOBS[self.id] = self
+        self.pid, self.feature, self.t1 = pid, feature, None
 
         self.engine = engine
         self.t0 = time.time()
@@ -46,6 +47,8 @@ class Job:
                 traceback.print_exc()
                 self.log.append(f"오류: {e}")
                 self.status = "error"
+            finally:
+                self.t1 = time.time()
 
         threading.Thread(target=run, daemon=True).start()
 
@@ -89,7 +92,20 @@ def progress(j):
 
 
 def job_out(j):
-    return {"id": j.id, "kind": j.kind, "status": j.status, "log": j.log[-200:], "result": j.result, "emitted": j.emitted, "progress": progress(j)}
+    return {"id": j.id, "kind": j.kind, "feature": j.feature, "pid": j.pid, "status": j.status, "log": j.log[-200:], "result": j.result, "emitted": j.emitted, "progress": progress(j)}
+
+
+@app.get("/api/jobs")
+def list_jobs():
+    """새로고침해도 작업 상자를 다시 띄우도록: 진행 중인 작업 + 30분 안에 오류로 끝난 작업."""
+    now = time.time()
+    out = []
+    for j in JOBS.values():
+        if j.kind == "assist":
+            continue
+        if j.status == "running" or (j.status == "error" and j.t1 and now - j.t1 < 1800):
+            out.append({"id": j.id, "kind": j.kind, "feature": j.feature, "pid": j.pid, "status": j.status})
+    return out
 
 
 @app.get("/api/jobs/{jid}")

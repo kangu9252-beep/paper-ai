@@ -153,7 +153,7 @@ tr.flash td { background: var(--hl); transition: background .3s; }
 .result .t { color: var(--muted); font-size: 12px; }
 .result .s { margin-top: 3px; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
 
-.jobs { position: fixed; right: 16px; bottom: 16px; display: flex; flex-direction: column; gap: 8px; z-index: 50; max-width: 380px; }
+.jobs { position: fixed; right: 16px; bottom: 76px; display: flex; flex-direction: column; gap: 8px; z-index: 50; max-width: 380px; }
 .job { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; box-shadow: var(--shadow); padding: 10px 12px; font-size: 12px; }
 .job .h { display: flex; gap: 8px; align-items: center; font-weight: 600; }
 .job .l { color: var(--muted); margin-top: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -369,3 +369,8 @@ dialog.fpick { width: 640px; max-width: calc(100vw - 32px); }
 .cost { font-size: 12px; color: #8a5a00; background: #fff3d6; border-radius: 99px; padding: 2px 9px; white-space: nowrap; align-self: center; }
 .cost.free { color: var(--accent); background: var(--accent-soft); }
 @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .cost:not(.free) { background: #3d3220; color: #f0c060; } }
+
+/* 작업 상자: 눌러서 전체 기록, 오류는 남김 */
+.job .l { cursor: pointer; }
+.job .full { max-height: 180px; overflow: auto; font-size: 11px; white-space: pre-wrap; margin: 6px 0 0; padding: 6px; background: var(--bg, #f6f6f6); border-radius: 6px; }
+.job.err { border-color: #d9534f; }

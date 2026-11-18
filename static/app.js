@@ -86,9 +86,10 @@ function runJob(id, title, { onEmit, onDone, logEl, onLog } = {}) {
   const card = document.createElement("div");
   card.className = "job";
   card.dataset.id = id;
-  card.innerHTML = `<div class="h"><span class="spin"></span><span class="grow">${esc(title)}</span><button class="icon" title="중지">■</button></div><div class="pg" hidden><div class="pg-bar"><span></span></div><div class="pg-t small"></div></div><div class="l">시작…</div>`;
+  card.innerHTML = `<div class="h"><span class="spin"></span><span class="grow">${esc(title)}</span><button class="icon" title="중지">■</button></div><div class="pg" hidden><div class="pg-bar"><span></span></div><div class="pg-t small"></div></div><div class="l" title="눌러서 전체 기록 보기">시작…</div><pre class="full" hidden></pre>`;
   $("#jobs").appendChild(card);
   $("button", card).onclick = () => api(`/api/jobs/${id}/stop`, { method: "POST" });
+  $(".l", card).onclick = () => { const f = $(".full", card); f.hidden = !f.hidden; if (!f.hidden) f.scrollTop = f.scrollHeight; };
   let emitted = 0;
   return new Promise((resolve) => {
     const tick = async () => {
@@ -108,6 +109,8 @@ function runJob(id, title, { onEmit, onDone, logEl, onLog } = {}) {
       }
       const last = j.log[j.log.length - 1] || "";
       $(".l", card).textContent = last;
+      const full = $(".full", card);
+      if (!full.hidden) { full.textContent = j.log.slice(-40).join("\n"); full.scrollTop = full.scrollHeight; }
       const pg = j.progress;
       const pgText = pg ? `${pg.pct}% · ${pg.n}/${pg.total}${pg.eta ? ` · 약 ${fmtEta(pg.eta)} 남음` : ""}` : "";
       if (pg) { $(".pg", card).hidden = false; $(".pg-bar span", card).style.width = pg.pct + "%"; $(".pg-t", card).textContent = pgText; }
@@ -127,7 +130,14 @@ function runJob(id, title, { onEmit, onDone, logEl, onLog } = {}) {
       if (j.status === "running") { setTimeout(tick, 1000); return; }
       $(".spin", card).remove();
       $(".h", card).insertAdjacentHTML("afterbegin", j.status === "done" ? "✅" : j.status === "error" ? "⚠️" : "⏹");
-      setTimeout(() => card.remove(), j.status === "error" ? 9000 : 4000);
+      if (j.status === "error") {  // 오류 상자는 직접 닫을 때까지 남김
+        card.classList.add("err");
+        const f = $(".full", card);
+        f.textContent = j.log.slice(-40).join("\n");
+        f.hidden = false;
+        const b = $("button", card);
+        b.textContent = "✕"; b.title = "닫기"; b.onclick = () => card.remove();
+      } else setTimeout(() => card.remove(), 4000);
       refreshStatus();
       onDone && onDone(j.result, j);
       resolve(j);
@@ -2106,4 +2116,25 @@ window.addEventListener("unhandledrejection", (e) => {
 window.addEventListener("beforeunload", () => saveNow());
 refreshStatus();
 setInterval(refreshStatus, 8000);
-loadProjects().then(() => (S.projects.length ? openProject(S.projects[0].id) : showWelcome()));
+
+// 새로고침해도 진행 중인 작업 상자를 다시 띄움 (오류로 끝난 작업도 30분간)
+const JOB_TITLES = {
+  scan: "참조 폴더 PDF 읽는 중", index: "PDF 읽는 중", plan: "연구 계획 세우기", route: "연구 경로 다시 짜기",
+  collect: "자료 모으기", write: "집필", autofind: "출처 자동 찾기", login: "도서관 로그인", matrix: "문헌분석표 만들기",
+  gaps: "연구 공백 찾기", intro: "서론 초안 쓰기", map: "연구 지도", meter: "근거 저울", journals: "투고 학술지 찾기",
+  ask: "내 자료에 묻기", explain: "쉽게 설명", model: "연구모형 그림", fetch: "논문 내려받기",
+};
+const REVIEW_TITLES = { structure: "뼈대 점검", cites: "인용 점검", uncited: "근거 없는 문장", discuss: "논의 보강", recent: "최신 연구",
+  refs: "참고문헌 대조", panel: "3인 모의 심사", panel_respond: "답변서 재심사", style: "문장 다듬기", aitone: "AI 문체 점검", full: "전체 검토" };
+async function restoreJobs() {
+  let list = [];
+  try { list = await api("/api/jobs"); } catch { return; }
+  const names = Object.fromEntries((S.projects || []).map((p) => [p.id, p.title]));
+  for (const j of list) {
+    if (document.querySelector(`.job[data-id="${j.id}"]`)) continue;
+    let t = j.kind === "review" ? REVIEW_TITLES[j.feature] || "원고 점검" : JOB_TITLES[j.kind] || "작업";
+    if (j.pid && names[j.pid]) t += ` — ${names[j.pid].slice(0, 14)}`;
+    runJob(j.id, t, { onDone: () => S.cur && j.pid === S.cur.id && openProject(S.cur.id) });
+  }
+}
+loadProjects().then(() => { restoreJobs(); return S.projects.length ? openProject(S.projects[0].id) : showWelcome(); });
