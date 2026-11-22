@@ -89,7 +89,10 @@ def extract_chunks(path, log=None):
                 break
             lines.extend(blines)
             lines.append(None)  # 블록 경계
-        if not in_refs and sum(len(x[0]) for x in lines if x) < 30 and page.get_images():
+        # 브라우저로 인쇄한 PDF(교보·DBpia 뷰어 등)는 위아래 여백에 날짜·주소 줄만 글자로 있고 본문은 사진 → 여백 글자는 빼고 센다
+        body = [x for x in lines if x and ph * 0.06 < x[1][1] and x[1][3] < ph * 0.94]
+        if not in_refs and sum(len(x[0]) for x in body) < 30 and page.get_images():
+            lines = []  # 여백의 인쇄 머리글은 버림
             n_ocr += 1
             if log and (n_ocr == 1 or (pno + 1) % 5 == 0):  # 멈춘 게 아니라는 걸 보이도록 몇 쪽째인지 알림
                 log(f"  └ 사진으로 된 PDF라 글자 인식 중… {pno + 1}/{len(doc)}쪽")
