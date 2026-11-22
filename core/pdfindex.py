@@ -1,6 +1,7 @@
 """PDF를 읽어 문단 조각으로 나누고, 각 줄의 위치(좌표)까지 저장한다.
 그래야 나중에 '이 문장이 논문 몇 쪽 어디에서 왔는지'를 형광펜으로 보여줄 수 있다."""
 import difflib
+import html as _html
 import json
 import math
 import os
@@ -91,7 +92,10 @@ def extract_chunks(path, log=None):
             lines.append(None)  # 블록 경계
         # 브라우저로 인쇄한 PDF(교보·DBpia 뷰어 등)는 위아래 여백에 날짜·주소 줄만 글자로 있고 본문은 사진 → 여백 글자는 빼고 센다
         body = [x for x in lines if x and ph * 0.06 < x[1][1] and x[1][3] < ph * 0.94]
-        if not in_refs and sum(len(x[0]) for x in body) < 30 and page.get_images():
+        btxt_all = "".join(x[0] for x in body)
+        # 글꼴이 깨져 'ž×Øč%CB' 같은 글자만 나오는 쪽도 사진처럼 읽는다 (한글·영문·숫자 비율이 낮음)
+        garbled = len(btxt_all) > 50 and len(re.findall(r"[가-힣A-Za-z0-9\s.,()]", btxt_all)) / len(btxt_all) < 0.6
+        if not in_refs and (sum(len(x[0]) for x in body) < 30 and page.get_images() or garbled):
             lines = []  # 여백의 인쇄 머리글은 버림
             n_ocr += 1
             if log and (n_ocr == 1 or (pno + 1) % 5 == 0):  # 멈춘 게 아니라는 걸 보이도록 몇 쪽째인지 알림
@@ -266,7 +270,7 @@ def index_pdf(path, meta=None, source="local", log=print, embed=True):
     path = str(Path(path).resolve())
     mtime = os.path.getmtime(path)
     old = db.q("SELECT id, mtime, title, authors, year, doi, venue, status FROM papers WHERE path=?", (path,), one=True)
-    if old and meta is None and old["title"] and old["status"] == "ok":  # 다시 읽을 때 사용자가 고친 인용 정보 유지
+    if old and meta is None and old["title"] and (old["status"] == "ok" or json.loads(old["authors"] or "[]")):  # 다시 읽어도(OCR 등) 채워 둔 저자·연도 유지  # 다시 읽을 때 사용자가 고친 인용 정보 유지
         meta = {**old, "authors": json.loads(old["authors"] or "[]")}
     if old and abs((old["mtime"] or 0) - mtime) < 1 and old["status"] != "notext":  # notext: 글자 인식 전 스캔본 → 다시 읽기
         return old["id"]
@@ -281,6 +285,7 @@ def index_pdf(path, meta=None, source="local", log=print, embed=True):
         meta = guess_meta(path, chunks) if status == "ok" else (meta_from_name(path) or {"title": Path(path).stem, "authors": [], "year": "", "doi": ""})
     if old:
         pid = old["id"]
+        old_chunks = {r["id"]: r["page"] for r in db.q("SELECT id, page FROM chunks WHERE paper_id=?", (pid,))}
         db.x("DELETE FROM chunks WHERE paper_id=?", (pid,))
         db.x(
             "UPDATE papers SET title=?, authors=?, year=?, doi=?, venue=?, status=?, pages=?, mtime=? WHERE id=?",
@@ -305,7 +310,36 @@ def index_pdf(path, meta=None, source="local", log=print, embed=True):
             rows.append((pid, c["page"], c["text"], json.dumps(c["lines"]), c["pw"], c["ph"], emb))
     db.xmany("INSERT INTO chunks(paper_id,page,text,lines,pw,ph,emb) VALUES(?,?,?,?,?,?,?)", rows)
     invalidate()
+    if old and old_chunks:
+        remap_cites(pid, old_chunks)
     return pid
+
+
+def remap_cites(paper_id, old_chunks):
+    """논문을 다시 읽으면(OCR 등) 조각 번호가 새로 매겨진다 → 원고에 연결해 둔 근거를 같은 문장이 있는 새 조각으로 옮긴다."""
+    new = db.q("SELECT id, page, text FROM chunks WHERE paper_id=?", (paper_id,))
+    nz = lambda t: re.sub(r"\s+", "", t or "").lower()  # OCR은 띄어쓰기가 달라서 빼고 비교
+    if not new:
+        return
+    pat = re.compile(r'<span[^>]*data-chunk="(' + "|".join(map(str, old_chunks)) + r')"[^>]*>')
+    for pr in db.q("SELECT id, content FROM projects WHERE content LIKE '%data-chunk=%'"):
+        html_ = pr["content"] or ""
+
+        def fix(m):
+            mq = re.search(r'data-quote="([^"]*)"', m.group(0))
+            quote = _html.unescape(mq.group(1) if mq else "")
+            page = old_chunks.get(int(m.group(1)))
+            q = nz(quote)[:80]
+            best = next((c for c in new if q and q in nz(c["text"])), None)
+            if not best and q:
+                best = max(new, key=lambda c: difflib.SequenceMatcher(None, q, nz(c["text"])).find_longest_match(0, len(q), 0, len(nz(c["text"]))).size)
+            if not best:
+                best = next((c for c in new if c["page"] == page), new[0])
+            return m.group(0).replace(f'data-chunk="{m.group(1)}"', f'data-chunk="{best["id"]}"', 1)
+
+        out = pat.sub(fix, html_)
+        if out != html_:
+            db.x("UPDATE projects SET content=? WHERE id=?", (out, pr["id"]))
 
 
 def is_own_draft(fn, mine):
