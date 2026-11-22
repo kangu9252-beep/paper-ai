@@ -68,6 +68,7 @@ function costTag(pid, key, mult = 1) {
   const e = S.est[pid];
   if (!e) return "";
   if (e.engine !== "claude") return `<span class="cost free" title="내 컴퓨터 로컬 AI로 해요">무료</span>`;
+  if (e.sub) return `<span class="cost free" title="내 Claude 구독(Claude Code)으로 해요 — 추가 요금 없음, 구독 사용량 안에서">구독</span>`;
   const w = Math.round((e.won[key] || 0) * mult);
   if (!w) return `<span class="cost free">0원</span>`;
   return `<span class="cost" title="Claude 사용 예상 금액(어림값). 원고가 그대로면 다시 돌리지 않아 0원이에요.">약 ${w.toLocaleString()}원</span>`;
@@ -1408,9 +1409,18 @@ async function autoFind(c) {
     onDone: (r) => {
       if (!r) { citeMsg.set(c, "오류가 났어요. 다시 시도해 주세요."); return layoutMemos(); }
       if (r.status === "linked") {
-        const keep = author && parseLabel(r.cite).author ? null : r.cite;
-        linkCite(c, r, keep);
-        toast("근거를 찾아 연결했어요");
+        if (!author) {
+          // 저자가 없는 자리('출처 필요' 등): AI가 고른 자료라서 확인 표시를 남긴다. 원래 글자는 메모에 남김
+          const before = c.textContent;
+          linkCite(c, r, /^\W*$|출처\s*필요|저자\s*미상|연도\s*미상/.test(before) ? r.cite : null);  // 빈자리일 때만 표기를 채움
+          c.classList.add("warn");
+          citeMsg.set(c, `AI가 고른 자료예요 (원래 표기: ${before}). 맞는 근거인지 확인해 주세요.`);
+          layoutMemos();
+          toast("근거 후보를 연결했어요 — 확인이 필요해요");
+        } else {
+          linkCite(c, r, null);  // 내가 쓴 인용 표기는 절대 바꾸지 않음
+          toast("근거를 찾아 연결했어요");
+        }
       } else if (r.status === "alternative") {
         if (confirm(`인용하신 ${c.textContent} 논문에서는 근거를 찾지 못했습니다.\n대신 ${r.cite} 「${r.title}」에서 근거를 찾았어요.\n\n인용을 ${r.cite}(으)로 바꿀까요?`)) linkCite(c, r, r.cite);
         else { citeMsg.set(c, `다른 자료 ${r.cite}에 근거가 있음 (바꾸지 않음)`); layoutMemos(); }
@@ -1426,7 +1436,7 @@ async function autoAll() {
   const list = $$(".cite.need", editor);
   if (!list.length) return toast("출처 필요(?) 표시가 없어요 👍");
   const e = S.est[S.cur.id] || (await loadEst(S.cur.id));
-  const money = e && e.engine === "claude" ? ` Claude 사용 예상 약 ${(e.won.autoall || 0).toLocaleString()}원.` : " 내 컴퓨터 로컬 AI로 해요(무료).";
+  const money = e && e.sub ? " 내 Claude 구독으로 해요(추가 요금 없음)." : e && e.engine === "claude" ? ` Claude 사용 예상 약 ${(e.won.autoall || 0).toLocaleString()}원.` : " 내 컴퓨터 로컬 AI로 해요(무료).";
   if (!confirm(`출처 필요 ${list.length}곳을 차례로 자동으로 찾을까요?${money}`)) return;
   for (const c of list) if (document.body.contains(c) && c.classList.contains("need")) await autoFind(c);
 }
@@ -2038,6 +2048,11 @@ async function renderSettings() {
     <div class="card"><h3>AI 엔진</h3>
       <label class="chk"><input type="radio" name="engine" value="local" ${s.engine !== "claude" ? "checked" : ""}> 내 컴퓨터 로컬 AI — 무료, 느림, 원고가 밖으로 나가지 않음</label>
       <label class="chk"><input type="radio" name="engine" value="claude" ${s.engine === "claude" ? "checked" : ""}> Claude (인터넷) — 연구계획·집필·원고 점검이 빠르고 정확함, 사용량만큼 요금</label>
+      <div style="margin:6px 0 2px 22px">
+        <label class="chk"><input type="radio" name="claude_via" value="api" ${s.claude_via !== "subscription" ? "checked" : ""}> API 키로 — 쓴 만큼 요금</label>
+        <label class="chk"><input type="radio" name="claude_via" value="subscription" ${s.claude_via === "subscription" ? "checked" : ""}> 내 Claude 구독으로 (이 컴퓨터의 Claude Code) — 추가 요금 없음, 한 번에 몇 초 더 걸림, 구독 사용량 한도 안에서</label>
+        <p class="small muted" style="margin:2px 0 0">구독은 이 컴퓨터 주인만 써요. 웹으로 들어온 친구는 항상 자기 API 키를 써요.</p>
+      </div>
       <label class="field" style="margin-top:6px"><span>Claude API 키 (Anthropic 콘솔에서 발급 · 이 컴퓨터에 암호화 저장)</span><input id="claude_key" type="password" value="${esc(s.claude_key)}" placeholder="sk-ant-..."></label>
       <div class="row"><button class="primary" id="claudeWiz">🧭 Claude 연결 도우미 (처음이라면)</button><button id="claudeTest">저장하고 연결 테스트</button><span id="claudeMsg" class="small"></span></div>
       <p class="small" id="claudeUsage" style="margin-bottom:0"></p>
@@ -2079,6 +2094,7 @@ async function renderSettings() {
     lib_login_url: $("#lib_login_url").value.trim(), lib_proxy_prefix: $("#lib_proxy_prefix").value.trim(),
     lib_id: $("#lib_id").value.trim(), lib_pw: $("#lib_pw").value,
     engine: $('input[name="engine"]:checked').value, claude_key: $("#claude_key").value,
+    claude_via: ($('input[name="claude_via"]:checked') || {}).value || "api",
   });
   $("#claudeWiz").onclick = () => claudeWizard(renderSettings);
   $("#scanPick").onclick = () => folderPicker({
@@ -2087,7 +2103,7 @@ async function renderSettings() {
     onSave: (sel) => { $("#scan_folders").value = sel.join("\n"); toast("아래 '저장'을 눌러 반영해 주세요"); },
   });
   $$('input[name="engine"]').forEach((r) => (r.onchange = () => {
-    if (r.value === "claude" && r.checked && !$("#claude_key").value) claudeWizard(renderSettings);
+    if (r.value === "claude" && r.checked && !$("#claude_key").value && $('input[name="claude_via"]:checked')?.value !== "subscription") claudeWizard(renderSettings);
   }));
   api("/api/claude/usage").then((u) => {
     $("#claudeUsage").innerHTML = u.calls
@@ -2134,7 +2150,7 @@ async function renderSettings() {
   };
   $("#saveSet").onclick = async () => {
     const c = collect();
-    if (c.engine === "claude" && !c.claude_key) return toast("Claude를 쓰려면 API 키를 넣어주세요");
+    if (c.engine === "claude" && !c.claude_key && c.claude_via !== "subscription") return toast("Claude를 쓰려면 API 키를 넣거나 '내 Claude 구독으로'를 골라주세요");
     await api("/api/settings", { json: c });
     toast("저장했어요");
     refreshStatus();

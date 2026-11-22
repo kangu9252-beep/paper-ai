@@ -38,7 +38,7 @@ def engine_for(project_id=None, night=False):
     if users.is_guest():
         return "claude"  # 웹으로 쓰는 사람은 Claude만 (키가 없으면 실행할 때 안내)
     s = db.get_settings()
-    if night or s.get("engine") != "claude" or not claude_key():
+    if night or s.get("engine") != "claude" or not (claude_key() or via_subscription()):
         return "local"
     if project_id:
         p = db.q("SELECT local_only FROM projects WHERE id=?", (project_id,), one=True)
@@ -253,11 +253,83 @@ def to_english(texts):
     return out
 
 
+def claude_cli():
+    """이 PC에 깔린 Claude Code 실행 파일 (없으면 None)"""
+    import os
+    import shutil
+
+    exe = os.path.join(os.environ.get("APPDATA", ""), "npm", "node_modules", "@anthropic-ai", "claude-code", "bin", "claude.exe")
+    return exe if os.path.exists(exe) else shutil.which("claude")
+
+
+def via_subscription():
+    """주인 컴퓨터에서 Claude를 API 키 대신 내 Claude 구독(Claude Code)으로 돌릴지.
+    웹으로 들어온 사람은 절대 안 됨 — 구독은 본인만 쓰는 것 (남과 나눠 쓰면 약관 위반)."""
+    from . import users
+
+    return not users.is_guest() and db.get_settings().get("claude_via") == "subscription" and bool(claude_cli())
+
+
+CLI_MODEL = {"claude-opus-5-5": "opus", "claude-sonnet-5-5": "sonnet", "claude-haiku-5-5": "haiku"}
+
+
+def _claude_cli(prompt, system, schema, model):
+    """Claude Code(claude -p)로 한 번 묻기. 추가 비용 없음(구독 사용량 안에서), 대신 한 번에 5초쯤 더 걸림."""
+    import os
+    import subprocess
+    import tempfile
+
+    from . import users
+
+    cmd = [claude_cli(), "-p", "--model", CLI_MODEL.get(model, "sonnet"), "--output-format", "json", "--tools", "", "--no-session-persistence",
+           "--system-prompt", system or "당신은 학술 논문 작성을 돕는 연구 보조자입니다. 요청한 것만 답하세요."]
+    if schema:
+        cmd += ["--json-schema", json.dumps(_strict(schema), ensure_ascii=False)]
+    env = {k: v for k, v in os.environ.items() if k not in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")}  # 키가 있으면 구독 대신 키로 청구되므로 뺀다
+    try:
+        r = subprocess.run(cmd, input=prompt.encode("utf-8"), capture_output=True, timeout=900, env=env, cwd=tempfile.gettempdir(),
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("Claude(구독)가 15분 안에 답하지 않았어요. 잠시 후 다시 해 주세요.")
+    out = r.stdout.decode("utf-8", "replace")
+    try:
+        d = json.loads(out)
+    except Exception:
+        err = (r.stderr.decode("utf-8", "replace") or out).strip()[-300:]
+        if "login" in err.lower() or "auth" in err.lower():
+            raise RuntimeError("Claude Code에 로그인되어 있지 않아요. 터미널에서 claude 를 한 번 실행해 로그인해 주세요.")
+        raise RuntimeError(f"Claude(구독) 실행 오류: {err}")
+    if d.get("is_error"):
+        msg = str(d.get("result") or d.get("api_error_status") or "")
+        if "limit" in msg.lower():
+            raise RuntimeError("Claude 구독 사용량 한도에 걸렸어요. 한도가 풀린 뒤 다시 하거나 설정에서 'API 키로'로 바꿔 주세요.")
+        raise RuntimeError(f"Claude(구독) 오류: {msg[:300]}")
+    try:
+        u = d.get("usage") or {}
+        inp = (u.get("input_tokens") or 0) + (u.get("cache_creation_input_tokens") or 0) + (u.get("cache_read_input_tokens") or 0)
+        db.x("INSERT INTO usage(model, input, output, user_id) VALUES(?, ?, ?, ?)", ("sub:" + model, inp, u.get("output_tokens") or 0, users.uid()))
+    except Exception:
+        pass
+    if not schema:
+        return d.get("result") or ""
+    so = d.get("structured_output")
+    if isinstance(so, dict):
+        return so
+    text = d.get("result") or ""
+    try:
+        return json.loads(text)
+    except Exception:
+        m = re.search(r"\{.*\}", text, re.S)
+        return json.loads(m.group(0)) if m else {}
+
+
 def _claude(prompt, system=None, schema=None, tier="standard"):
     import anthropic
 
     from . import users
 
+    if via_subscription():
+        return _claude_cli(prompt, system, schema, TIERS.get(tier, TIERS["standard"])[0])
     key = claude_key()
     if not key:
         raise RuntimeError("Claude API 키가 없습니다. " + ("오른쪽 위 '내 설정'에서 내 키를 넣어주세요." if users.is_guest() else "설정에서 넣어주세요."))
@@ -313,6 +385,8 @@ def _claude(prompt, system=None, schema=None, tier="standard"):
 
 
 def cost_usd(model, inp, out):
+    if (model or "").startswith("sub:"):
+        return 0.0  # 구독으로 돌린 것은 추가 비용 없음
     pi, po = next((v for k, v in PRICES.items() if (model or "").startswith(k)), PRICES["claude-opus-5-5"])
     return inp / 1e6 * pi + out / 1e6 * po
 

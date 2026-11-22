@@ -188,6 +188,9 @@ def sections(soup):
     return [s for s in out if s[0] or s[1]]
 
 
+PLACEHOLDER = re.compile(r"^\W*$|출처\s*필요|저자\s*미상|연도\s*미상")
+
+
 def parse_label(label):
     t = label.strip()
     m = re.match(r"^\(?\s*(.+?)\s*,\s*(" + YEAR + r"|연도미상)(?:\s*,\s*pp?\.\s*[\d\-–]+)?\s*\)?$", t) or re.match(
@@ -304,10 +307,15 @@ def check_citations(pid, log, stop=lambda: False, use_internet=True):
             r = agent.autofind(sent, author, year, lambda m: log("   " + m)) if use_internet else _local_find(sent, author, year)
             if r and r.get("status") == "linked":
                 c["data-chunk"], c["data-quote"] = str(r["chunk_id"]), r.get("quote", "")
-                if not author:
-                    c.string = r["cite"]
-                set_state(c, None)
-                item["status"], item["note"] = "ok", "근거 위치를 찾아 연결함"
+                if not author:  # 저자가 없던 자리: AI가 고른 자료 → 확인 표시 (내가 쓴 저자 표기는 절대 안 바꿈)
+                    before = c.get_text()
+                    if PLACEHOLDER.search(before):  # '(출처 필요)' 같은 빈자리일 때만 표기를 채움
+                        c.string = r["cite"]
+                    set_state(c, "warn", f"AI가 고른 자료예요 (원래 표기: {before}). 맞는 근거인지 확인해 주세요")
+                    item["status"], item["note"] = "warn", f"AI가 고른 자료 {r['cite']} — 확인 필요"
+                else:
+                    set_state(c, None)
+                    item["status"], item["note"] = "ok", "근거 위치를 찾아 연결함"
             elif r and r.get("status") == "alternative":
                 c["data-sug-chunk"], c["data-sug-quote"], c["data-sug-label"] = str(r["chunk_id"]), r.get("quote", ""), r["cite"]
                 set_state(c, "need", f"인용한 논문에서는 못 찾음 — 다른 자료 {r['cite']}에 근거 있음")
@@ -331,6 +339,8 @@ def _local_find(sent, author, year):
     hit = agent.find_in_paper(sent, ids) if ids else None
     if hit:
         return {"status": "linked", **hit}
+    if author and not ids:
+        return None  # 인용한 논문 PDF가 없음 → 다른 논문을 몰래 붙이지 않음
     hit = agent._pick(sent, pdfindex.search(sent, k=5, paper_ids=ids or None, per_paper=5 if ids else 2))
     return {"status": "linked", **hit} if hit else None
 
@@ -1316,4 +1326,6 @@ def estimates(pid):
         "explain": E("standard", 2500, 600),
         "scan_per_pdf": E("light", 2000, 200),
     }
-    return {"engine": llm.engine_for(pid), "won": est, "month": llm.usage_this_month(), "cap": int(db.get_settings().get("monthly_cap_won") or 0)}
+    eng = llm.engine_for(pid)
+    sub = eng == "claude" and llm.via_subscription()
+    return {"engine": eng, "sub": sub, "won": est, "month": llm.usage_this_month(), "cap": int(db.get_settings().get("monthly_cap_won") or 0)}
