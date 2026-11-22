@@ -191,6 +191,12 @@ def meta_from_name(path):
     return {"title": title, "authors": authors[:10], "year": m.group("y"), "doi": ""}
 
 
+def clean_author(a):
+    """OCR·PDF에서 읽은 저자 이름 정리: '박 은 아'→'박은아', '서정해1'·'이개신*'·'홍길동†' 꼬리표 제거"""
+    a = re.sub(r"(?<=[가-힣])\s+(?=[가-힣])", "", str(a)).strip()
+    return re.sub(r"[\d*†‡,·)]+$|^[(]+", "", a).strip()
+
+
 def guess_meta(path, chunks):
     first = " ".join(c["text"] for c in chunks if c["page"] < 2)[:6000]
     m = DOI_RE.search(first)
@@ -226,7 +232,7 @@ def guess_meta(path, chunks):
                 return named | {"title": r.get("title") or named["title"]}
             return {
                 "title": r.get("title") or Path(path).stem,
-                "authors": [a for a in r.get("authors", []) if a][:20],
+                "authors": [clean_author(a) for a in r.get("authors", []) if clean_author(a)][:20],
                 "year": yr.group(0) if yr else "",
                 "doi": "",
             }
