@@ -574,7 +574,7 @@ def parse_ref(t):
     year = (m.group(1) or m.group(2))
     head = t[: m.start()].strip()
     if re.match(r"[가-힣]", head):
-        a = re.match(r"[가-힣]{2,5}", head.replace(" ", ""))
+        a = re.match(r"[가-힣]+", head.split(",")[0].replace(" ", ""))  # '국가데이터처'처럼 긴 기관 저자도
         return (a.group(0) if a else head[:4]), year
     return head.split(",")[0].strip().split()[-1].lower() if head else None, year
 
@@ -589,11 +589,18 @@ def check_references(pid, log, stop=lambda: False):
     for t in refs:
         a, y = parse_ref(t)
         ref_keys.append({"text": t[:200], "author": a, "year": y})
-    cites = {}
+    cites, alts = {}, {}
     for c in soup.find_all("span", class_="cite"):
         a, y = parse_label(c.get_text())
         if a:
-            cites.setdefault((first_surname(a), y[:4]), c.get_text())
+            key = (first_surname(a), y[:4])
+            cites.setdefault(key, c.get_text())
+            # 'Hazan과 Shaver(1987)', '조명한, 차경호(1998)'처럼 앞 저자가 칸 밖 문장에 있는 경우, '(성인, 이양선, …)'처럼 앞에 다른 말이 낀 경우
+            names = [first_surname(x) for x in re.split(r"\s*(?:,|&|and|·)\s*", re.sub(r"\s*(외|et al\.?)\s*$", "", a)) if x.strip()]
+            prev = c.previous_sibling if isinstance(c.previous_sibling, str) else ""
+            m = re.search(r"(?:(?:[가-힣]{2,4}|[A-Z][A-Za-z\-]+)\s*(?:과|와|,|&|and)\s*)+$", prev or "")
+            before = re.findall(r"[가-힣]{2,4}(?=\s*(?:과|와|,))|[A-Z][A-Za-z\-]+", m.group(0)) if m else []
+            alts.setdefault(key, set()).update(names + [first_surname(x) for x in before])
 
     def same(a1, a2):
         return a1 and a2 and (a1 == a2 or (re.match(r"[a-z]", a1 or "") and a1 == a2.lower()))
@@ -601,6 +608,8 @@ def check_references(pid, log, stop=lambda: False):
     missing, wrong_year, used = [], [], set()
     for (a, y), label in cites.items():
         hit = [i for i, r in enumerate(ref_keys) if same(a, r["author"]) and r["year"] and r["year"][:4] == y]
+        if not hit:
+            hit = [i for i, r in enumerate(ref_keys) if r["year"] and r["year"][:4] == y and any(same(x, r["author"]) for x in alts.get((a, y), ()))]
         if hit:
             used.update(hit)
             continue
