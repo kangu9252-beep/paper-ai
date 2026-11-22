@@ -370,6 +370,8 @@ def papers():
     for r in rows:
         r["authors"] = json.loads(r["authors"] or "[]")
         r["cite"] = pdfindex.cite_label(r["authors"], r["year"])
+        if users.is_guest():  # 웹으로 쓰는 사람에게 이 PC의 폴더 경로는 보이지 않게
+            r["path"] = Path(r["path"]).name
     return rows
 
 
@@ -415,6 +417,8 @@ def cite_folders(pid: int):
     """원고에 인용된 논문이 내 자료의 어느 폴더에 있는지 → 참조 폴더 추천 (AI 안 씀, 무료)"""
     from bs4 import BeautifulSoup
 
+    if users.is_guest():  # 웹으로 쓰는 사람은 폴더를 고르지 않음 (이 PC 경로도 보이면 안 됨)
+        return {"total": 0, "found": 0, "cites": [], "suggest": []}
     p = db.q("SELECT content FROM projects WHERE id=?", (pid,), one=True) or {}
     soup = BeautifulSoup(p.get("content") or "", "html.parser")
     pdfindex.set_scope([])  # 내 자료 전체에서
