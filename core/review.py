@@ -222,7 +222,11 @@ def cite_sentence(el):
         if node is el:
             seen = True
             continue
-        if isinstance(node, NavigableString) and not node.find_parent("span", class_="cite"):
+        if isinstance(node, NavigableString):
+            other = node.find_parent("span", class_="cite")
+            # 다른 인용 칸: 괄호 인용은 빼고, '서희진(2009a)'처럼 문장의 일부인 인용은 글자를 살린다 (빼면 '황선환과 이'처럼 문장이 깨짐)
+            if other is not None and (other is el or not re.search(r"\(\s*" + YEAR + r"\s*\)$", other.get_text().strip())):
+                continue
             if seen:
                 after += str(node)
             else:
@@ -292,6 +296,13 @@ def check_citations(pid, log, stop=lambda: False, use_internet=True):
             else:
                 quote = c.get("data-quote") or e["text"][:600]
                 good = agent.verify_batch([(sent, quote)])[0] if sent else True
+                if not good and sent and author:  # 예전에 붙은 위치가 틀렸을 수 있음 → 인용한 논문 안에서 다시 찾아본다
+                    ids = [x["id"] for x in pdfindex.find_papers_by_cite(author, year)]
+                    hit = agent.find_in_paper(sent, ids) if ids else None
+                    if hit and agent.verify_batch([(sent, hit["quote"])])[0]:
+                        c["data-chunk"], c["data-quote"] = str(hit["chunk_id"]), hit["quote"]
+                        log("   같은 논문에서 더 맞는 근거 위치를 찾아 고침")
+                        good = True
                 if good:
                     set_state(c, None)
                     item["status"] = "ok"
