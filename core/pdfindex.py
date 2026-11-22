@@ -191,9 +191,28 @@ def meta_from_name(path):
     return {"title": title, "authors": authors[:10], "year": m.group("y"), "doi": ""}
 
 
+def korean_names(meta, named):
+    """OpenAlex는 한국 논문 저자를 'Ji-Min Lee'처럼 영문으로 준다 → 파일 이름에 한글 저자가 있으면 그걸 앞에 쓴다 (원고의 '이지민(2021)'과 맞추려고)"""
+    au = meta.get("authors") or []
+    ko = []
+    for a in (named or {}).get("authors", []):
+        for x in a.split():  # '손일영 김해란'처럼 띄어쓰기로만 나뉜 이름
+            if re.fullmatch(r"[가-힣]{6}|[가-힣]{9}", x):  # 붙어 버린 세 글자 이름들
+                ko += [x[i:i + 3] for i in range(0, len(x), 3)]
+            elif re.match(r"[가-힣]", x):
+                ko.append(x)
+    if ko and au and not any(re.match(r"[가-힣]", a) for a in au):
+        meta = {**meta, "authors": ko + au[len(ko):]}
+    return meta
+
+
 def clean_author(a):
     """OCR·PDF에서 읽은 저자 이름 정리: '박 은 아'→'박은아', '서정해1'·'이개신*'·'홍길동†' 꼬리표 제거"""
-    a = re.sub(r"(?<=[가-힣])\s+(?=[가-힣])", "", str(a)).strip()
+    a = str(a).strip()
+    if re.fullmatch(r"[가-힣](\s+[가-힣]){1,4}", a):  # '박 은 아'처럼 한 글자씩 띄운 이름만 붙임 ('홍세은 정지수'는 두 사람)
+        a = re.sub(r"\s+", "", a)
+    if re.search(r"대학|학과|교수|졸업|연구소|University|Department", a):  # 저자가 아니라 소속
+        return ""
     return re.sub(r"[\d*†‡,·)]+$|^[(]+", "", a).strip()
 
 
@@ -206,7 +225,7 @@ def guess_meta(path, chunks):
         doi = m.group(1).rstrip(".)]")
         meta = web.openalex_by_doi(doi)
         if meta:
-            return meta
+            return korean_names(meta, meta_from_name(path))
     named = meta_from_name(path)
     if named and not NOTE_RE.search(named["title"]) and not named.get("note_title"):  # 파일 이름이 정보를 주면 AI에게 묻지 않음 (빠르고 정확)
         return named
