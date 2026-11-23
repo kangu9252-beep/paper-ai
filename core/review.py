@@ -13,12 +13,13 @@ from bs4 import BeautifulSoup, NavigableString
 from . import agent, db, llm, pdfindex, web
 
 YEAR = r"(?:19|20)\d{2}[a-z]?"
-# (저자, 2020) / (저자, 2020; 저자2 외, 2019) / (Smith & Lee, 2020, p. 3)
+YEARX = YEAR + r"(?:/" + YEAR + r")?"  # 번역서: 1988/2014 (원저/번역서)
+# (저자, 2020) / (저자, 2020; 저자2 외, 2019) / (Smith & Lee, 2020, p. 3) / (Bowlby, 1988/2014)
 PAREN_RE = re.compile(r"\(([^()]*?" + YEAR + r"[^()]*?)\)")
-PART_RE = re.compile(r"^\s*([^,;()\d][^;()]*?),?\s+(" + YEAR + r")(?:\s*,\s*pp?\.\s*[\d\-–]+)?\s*$")
+PART_RE = re.compile(r"^\s*([^,;()\d][^;()]*?),?\s+(" + YEARX + r")(?:\s*,\s*pp?\.\s*[\d\-–]+)?\s*$")
 # 저자(2020) / Neff et al.(2003) / 홍길동 외(2019)
 NARR_RE = re.compile(
-    r"((?<![가-힣A-Za-z0-9])[가-힣]{2,4}(?:\s?외)?|[A-Z][A-Za-z\-']+(?:\s(?:et al\.|&\s[A-Z][A-Za-z\-']+|and\s[A-Z][A-Za-z\-']+))?)\s?\((" + YEAR + r")\)"
+    r"((?<![가-힣A-Za-z0-9])[가-힣]{2,4}(?:\s?외)?|[A-Z][A-Za-z\-']+(?:\s(?:et al\.|&\s[A-Z][A-Za-z\-']+|and\s[A-Z][A-Za-z\-']+))?)\s?\((" + YEARX + r")\)"
 )
 # 서술형 재인용: 조명한, 차경호(1998: 김명소 외, 2001에서 재인용)
 NARR2_RE = re.compile(
@@ -225,8 +226,8 @@ def secondary_label(label, sec_cite):
 
 def parse_label(label):
     t = SECONDARY_RE.sub("", label.strip())
-    m = re.match(r"^\(?\s*(.+?)\s*,\s*(" + YEAR + r"|연도미상)(?:\s*,\s*pp?\.\s*[\d\-–]+)?\s*\)?$", t) or re.match(
-        r"^(.+?)\s?\((" + YEAR + r")\)$", t
+    m = re.match(r"^\(?\s*(.+?)\s*,\s*(" + YEARX + r"|연도미상)(?:\s*,\s*pp?\.\s*[\d\-–]+)?\s*\)?$", t) or re.match(
+        r"^(.+?)\s?\((" + YEARX + r")\)$", t
     )
     if not m:
         return "", ""
@@ -651,7 +652,8 @@ def check_references(pid, log, stop=lambda: False):
     ref_keys = []
     for t in refs:
         a, y = parse_ref(t)
-        ref_keys.append({"text": t[:200], "author": a, "year": y})
+        og = re.search(r"(?:원저|Original work published)\s*((?:19|20)\d{2})", t, re.I)  # 번역서: '(원저 1988 출판)'
+        ref_keys.append({"text": t[:200], "author": a, "year": y, "orig": og.group(1) if og else ""})
     cites, alts, optional = {}, {}, set()
     for c in soup.find_all("span", class_="cite"):
         a, y = parse_label(c.get_text())
@@ -670,14 +672,17 @@ def check_references(pid, log, stop=lambda: False):
             before = re.findall(r"[가-힣]{2,4}(?=\s*(?:과|와|,))|[A-Z][A-Za-z\-]+", m.group(0)) if m else []
             alts.setdefault(key, set()).update(names + [first_surname(x) for x in before])
 
+    def yr_ok(r, y):  # 본문 1988(/2014)은 목록의 2014년 번역서 '(원저 1988 출판)'와도 맞음
+        return bool(r["year"]) and (r["year"][:4] == y or r["orig"] == y)
+
     def same(a1, a2):
         return a1 and a2 and (a1 == a2 or (re.match(r"[a-z]", a1 or "") and a1 == a2.lower()))
 
     missing, wrong_year, used = [], [], set()
     for (a, y), label in cites.items():
-        hit = [i for i, r in enumerate(ref_keys) if same(a, r["author"]) and r["year"] and r["year"][:4] == y]
+        hit = [i for i, r in enumerate(ref_keys) if same(a, r["author"]) and yr_ok(r, y)]
         if not hit:
-            hit = [i for i, r in enumerate(ref_keys) if r["year"] and r["year"][:4] == y and any(same(x, r["author"]) for x in alts.get((a, y), ()))]
+            hit = [i for i, r in enumerate(ref_keys) if yr_ok(r, y) and any(same(x, r["author"]) for x in alts.get((a, y), ()))]
         if hit:
             used.update(hit)
             continue

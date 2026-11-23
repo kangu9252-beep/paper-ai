@@ -1284,7 +1284,7 @@ function detectCites(force) {
 const SECONDARY_RE = /\s*(?:[:;]\s*|,\s*(?=as cited in))(?:as cited in\s+[^()]+?|[^():;]+?\s*에서\s*재인용)\s*(?=\)|$)/i;
 function parseLabel(label) {
   const t = label.trim().replace(SECONDARY_RE, "");
-  const m = t.match(/^\(?\s*(.+?)\s*,\s*((?:19|20)\d{2}[a-z]?|연도미상)(?:\s*,\s*pp?\.\s*[\d\-–]+)?\s*\)?$/) || t.match(/^(.+?)\s?\(((?:19|20)\d{2}[a-z]?)\)$/);
+  const m = t.match(/^\(?\s*(.+?)\s*,\s*((?:19|20)\d{2}[a-z]?(?:\/(?:19|20)\d{2}[a-z]?)?|연도미상)(?:\s*,\s*pp?\.\s*[\d\-–]+)?\s*\)?$/) || t.match(/^(.+?)\s?\(((?:19|20)\d{2}[a-z]?(?:\/(?:19|20)\d{2}[a-z]?)?)\)$/);
   return m ? { author: m[1].trim(), year: m[2] === "연도미상" ? "" : m[2] } : { author: "", year: "" };
 }
 
