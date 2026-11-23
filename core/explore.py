@@ -418,11 +418,14 @@ def _state(pid):
         f"길잡이 유형: {PERSONA.get((rep.get('guide') or {}).get('persona'), '아직 안 고름')}",
         f"연구계획: {'있음' if p.get('plan') else '없음'}", f"내 자료 PDF: {papers}편", f"문헌분석표: {len(m)}편",
         f"원고: {len(text.get_text())}자, 인용 {len(cites)}개(근거 연결 {sum(1 for c in cites if c.get('data-chunk'))}개)",
+        "지금 원고의 인용 상태(가장 최신, 아래 '인용 점검 결과'보다 우선): "
+        f"근거 확인 {sum(1 for c in cites if not ({'need', 'warn'} & set(c.get('class') or [])))}곳, "
+        f"내용 확인 필요 {sum(1 for c in cites if 'warn' in (c.get('class') or []))}곳, 근거 없음 {sum(1 for c in cites if 'need' in (c.get('class') or []))}곳",
         f"AI 엔진: {llm.engine_for(pid)}", f"로컬 AI만 사용: {'예' if p.get('local_only') else '아니오'}",
     ]
     for k, label in (("structure", "예비심사 리뷰"), ("panel", "3인 모의 심사"), ("cites", "인용 점검"), ("refs", "참고문헌 대조"), ("style", "문장 다듬기"), ("aitone", "AI 문체 점검")):
         if rep.get(k):
-            lines.append(f"{label} 결과: {rep[k].get('summary', '')[:160]}")
+            lines.append(f"{label} 결과{'(예전에 돌린 것)' if k == 'cites' else ''}: {rep[k].get('summary', '')[:160]}")
     if rep.get("panel", {}).get("data", {}).get("required"):
         req = rep["panel"]["data"]["required"]
         lines.append("모의 심사 수정 요구: " + " / ".join(f"{it['id']}. {it['issue'][:60]}({it.get('status') or '미답변'})" for it in req[:10]))
@@ -437,9 +440,11 @@ def assist(pid, messages, log):
         f"{APP_MAP}\n\n[지금 연구자의 진행 상황]\n{_state(pid)}\n\n[대화]\n{convo}\n\n"
         "마지막 연구자 말에 답하세요. answer는 쉬운 한국어로, 짧은 문단이나 번호 목록으로(길어도 10줄). 무엇을, 왜, 어떤 순서로 하면 되는지 구체적으로. "
         "앱 기능이 도움이 되면 actions에 바로가기 버튼을 1~3개 넣으세요(label은 버튼 글자, anchor는 위 기능 위치). "
-        "논문 방법론 질문에는 일반적인 원칙으로 답하되, 학교·학과 규정과 지도교수 판단을 확인하라고 덧붙이세요. 모르는 것은 모른다고 하세요.",
-        system="당신은 '논문 AI' 앱 안의 도우미입니다. 상담심리 등 사회과학 대학원생이 학위논문을 쓰도록 돕는 친절한 선배 연구자이자 앱 안내자입니다. "
-        "연구자는 개발자가 아니므로 전문용어는 풀어서 설명합니다.",
+        "논문 방법론 질문에는 일반적인 원칙으로 답하되, 학교·학과 규정과 지도교수 판단을 확인하라고 덧붙이세요. 모르는 것은 모른다고 하세요. "
+        "연구자가 '괜찮을까요? 좋아할까요? 어때요?'처럼 평가·판단을 물으면 3단 진단으로 답하세요: ⚠ 약점(가장 길게) → 🔧 현실적인 보완책 → ⚖ 객관적 판단(근거와 확신 정도). "
+        "기호(**, #, <br> 등) 없이 평범한 글로 쓰고, 문단 사이는 빈 줄로 띄우세요.",
+        system="당신은 '논문 AI' 앱 안의 도우미입니다. 상담심리 등 사회과학 대학원생이 학위논문을 쓰도록 돕는 말투는 친절하지만 내용은 냉정한 선배 연구자이자 앱 안내자입니다. "
+        "연구자는 개발자가 아니므로 전문용어는 풀어서 설명합니다." + llm.OBJECTIVE,
         schema=ASSIST_SCHEMA,
         num_ctx=8192,
         num_predict=900,

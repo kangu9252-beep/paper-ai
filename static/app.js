@@ -584,6 +584,7 @@ async function renderCollect() {
       <p class="small muted owner-only">내 자료 폴더: ${esc((S.status?.settings?.scan_folders || []).join(" · "))} (설정에서 변경)</p></div>
     <div class="card" id="refFolders"><div class="row"><h3 class="grow">📁 이 논문이 참조할 폴더</h3><button class="primary" id="refPick">폴더 고르기</button></div>
       <p class="small muted" style="margin:2px 0 8px">정해 두면 이 논문의 근거 찾기·문헌분석·집필이 <b>고른 폴더 안의 PDF에서만</b> 이뤄져요. 다른 과목 자료가 섞이지 않아 더 빠르고 정확해요.</p>
+      <p class="small fp-tip" style="margin:0 0 8px">💡 가능하시다면 <b>이 논문의 자료(논문 PDF)를 한 폴더에 모아 넣어 주시는 것을 추천드립니다.</b> 여러 곳에 흩어져 있으면 같은 논문이 여러 번 읽히거나, 있는 논문도 못 찾는 경우가 생겨요. 한 폴더 안에 주제별 하위 폴더를 만드는 건 괜찮아요.</p>
       ${(p.ref_folders || []).length ? `<div class="fp-sel">${p.ref_folders.map((f) => `<span class="fp-chip" title="${esc(f)}">📁 ${esc(f)}</span>`).join("")}</div>
         <div class="small muted" style="margin-top:6px">이 폴더들에서 읽힌 논문 <b>${p.ref_papers ?? 0}편</b></div>` : `<div class="small muted">지정 안 함 — 내 자료 전체(${S.status?.papers || 0}편)에서 찾아요</div>`}</div>
     ${S.status?.gdrive ? `<div class="card gd-card"><div class="row"><div class="grow"><b>☁ 구글 드라이브에도 논문이 있나요?</b>
@@ -947,7 +948,7 @@ function folderPicker({ title, hint, selected = [], onSave, cover = null }) {
   let cur = "";
   const chips = () => sel.length ? sel.map((f, i) => `<span class="fp-chip" title="${esc(f)}">📁 ${esc(f.split(/[\\/]/).filter(Boolean).slice(-2).join(" › "))}<b data-rm="${i}">✕</b></span>`).join("") : `<span class="small muted">아직 고른 폴더가 없어요</span>`;
   const draw = async () => {
-    d.innerHTML = `<h3 style="margin:0 0 4px">${esc(title)}</h3><p class="small muted" style="margin:0 0 8px">${esc(hint || "")}</p>
+    d.innerHTML = `<h3 style="margin:0 0 4px">${esc(title)}</h3><p class="small muted" style="margin:0 0 8px;white-space:pre-line">${esc(hint || "")}</p>
       <div class="fp-sel">${chips()}</div><div class="fp-cover"></div>
       <div class="fp-nav"><button class="small" id="fpUp" ${cur ? "" : "disabled"}>⬆ 위로</button><span class="small muted fp-path">${esc(cur || "내 컴퓨터")}</span></div>
       <div class="fp-list"><div class="small muted"><span class="spin"></span> 폴더를 살펴보는 중…</div></div>
@@ -1005,7 +1006,8 @@ async function chooseRefFolders(after) {
   const p = S.cur;
   folderPicker({
     title: "📁 이 논문이 참조할 폴더",
-    hint: "⚠ 이 논문과 관련된 논문만 모아 둔 폴더를 골라 주세요. 드라이브 전체나 큰 폴더를 고르면 상관없는 PDF까지 다 읽느라 비용(Claude 사용료)과 시간이 많이 들어요. 고른 폴더 안의 PDF에서만 근거를 찾고, 하위 폴더까지 함께 읽어요.",
+    hint: "⚠ 이 논문과 관련된 논문만 모아 둔 폴더를 골라 주세요. 드라이브 전체나 큰 폴더를 고르면 상관없는 PDF까지 다 읽느라 비용(Claude 사용료)과 시간이 많이 들어요. 고른 폴더 안의 PDF에서만 근거를 찾고, 하위 폴더까지 함께 읽어요.
+💡 가능하시다면 이 논문의 자료를 한 폴더에 모아 넣어 주시는 것을 추천드립니다. 흩어져 있으면 있는 논문도 못 찾을 수 있어요.",
     selected: p.ref_folders || [],
     cover: await api(`/api/projects/${p.id}/cite_folders`).catch(() => null),
     onSave: async (sel) => {

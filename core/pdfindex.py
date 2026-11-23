@@ -321,12 +321,12 @@ def remap_cites(paper_id, old_chunks):
     nz = lambda t: re.sub(r"\s+", "", t or "").lower()  # OCR은 띄어쓰기가 달라서 빼고 비교
     if not new:
         return
-    pat = re.compile(r'<span[^>]*data-chunk="(' + "|".join(map(str, old_chunks)) + r')"[^>]*>')
+    pat = re.compile(r'<span[^>]*\bdata-chunk="(' + "|".join(map(str, old_chunks)) + r')"[^>]*>')
     for pr in db.q("SELECT id, content FROM projects WHERE content LIKE '%data-chunk=%'"):
         html_ = pr["content"] or ""
 
         def fix(m):
-            mq = re.search(r'data-quote="([^"]*)"', m.group(0))
+            mq = re.search(r'\bdata-quote="([^"]*)"', m.group(0))
             quote = _html.unescape(mq.group(1) if mq else "")
             page = old_chunks.get(int(m.group(1)))
             q = nz(quote)[:80]

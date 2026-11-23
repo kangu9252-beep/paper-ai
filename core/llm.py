@@ -69,8 +69,55 @@ PRICES = {"claude-opus-5-5": (4.0, 20.0), "claude-sonnet-5-5": (2.0, 10.0), "cla
 WON_PER_USD = 1400
 
 
+# 맞장구(동조)·감싸 주기(온정주의)를 줄이는 공통 원칙 — 검토·도우미 지시문에 붙인다
+OBJECTIVE = (
+    " [객관 진단 원칙] 연구자의 기분을 맞추려고 동의하거나 칭찬하지 않습니다. '좋은 질문이에요', '훌륭합니다' 같은 인사말로 시작하지 않습니다. "
+    "지도교수·심사위원(레드팀)의 눈으로 약점을 먼저, 가장 많이 다룹니다(답의 절반 정도). 그다음 지금 할 수 있는 현실적인 보완책을 구체적으로 제시하고(30% 정도), "
+    "마지막으로 근거에 비춘 객관적 판단과 그 확신 정도를 밝힙니다(20% 정도). 잘된 점은 근거가 분명할 때만 짧게 말합니다. "
+    "자료·논문·수치를 지어내지 않고, 확인할 수 없는 것은 '확인 필요'라고 씁니다."
+)
+
+
+# AI 답에 섞여 나오는 마크다운·HTML 기호(**굵게**, ## 제목, <br> 등)를 지워 읽기 쉽게 한다.
+# 원문 인용(quote)·근거 문장은 원문과 글자가 같아야 하므로 건드리지 않는다.
+_TAG_RE = re.compile(r"</?(?:br|p|b|strong|i|em|u|ul|ol|li|h[1-6]|span|div|table|tr|td|th|hr)\b[^>]*>", re.I)
+
+
+def tidy(t):
+    if not isinstance(t, str) or not t:
+        return t
+    t = re.sub(r"<br\s*/?>|</p>|</li>|</h[1-6]>", "\n", t, flags=re.I)
+    t = re.sub(r"<li\b[^>]*>", "• ", t, flags=re.I)
+    t = _TAG_RE.sub("", t)
+    t = re.sub(r"\*\*(.+?)\*\*|__(.+?)__", lambda m: m.group(1) or m.group(2), t, flags=re.S)
+    t = re.sub(r"(?m)^\s{0,3}#{1,6}\s+", "", t)  # ## 제목
+    t = re.sub(r"(?m)^\s*[-*]\s+", "• ", t)  # - 목록 → •
+    t = re.sub(r"(?m)^\s*(?:---+|\*\*\*+)\s*$", "", t)  # 가로줄
+    t = re.sub(r"`([^`\n]+)`", r"\1", t)
+    t = re.sub(r"&nbsp;", " ", t)
+    return re.sub(r"\n{3,}", "\n\n", t).strip()
+
+
+_KEEP = re.compile(r"quote|sentence|original|text|label|anchor|id$|chunk|doi|url|author|title|venue|path|query|keyword", re.I)
+
+
+def _tidy_all(v, key=""):
+    if isinstance(v, str):
+        return v if _KEEP.search(key) else tidy(v)
+    if isinstance(v, list):
+        return [_tidy_all(x, key) for x in v]
+    if isinstance(v, dict):
+        return {k: _tidy_all(x, k) for k, x in v.items()}
+    return v
+
+
 def chat(prompt, system=None, schema=None, temperature=0.2, num_ctx=8192, model=None, num_predict=1500, tier="standard"):
-    """schema(JSON Schema)를 주면 그 형식의 dict를 돌려준다. num_predict는 폭주 방지용 출력 상한(로컬)."""
+    """schema(JSON Schema)를 주면 그 형식의 dict를 돌려준다. 답 속 마크다운·HTML 기호는 지운다."""
+    r = _chat_raw(prompt, system, schema, temperature, num_ctx, model, num_predict, tier)
+    return _tidy_all(r) if schema else r
+
+
+def _chat_raw(prompt, system=None, schema=None, temperature=0.2, num_ctx=8192, model=None, num_predict=1500, tier="standard"):
     if engine() == "claude":
         return _claude(prompt, system, schema, tier)
     msgs = []

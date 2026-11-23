@@ -596,7 +596,7 @@ def check_references(pid, log, stop=lambda: False):
             key = (first_surname(a), y[:4])
             cites.setdefault(key, c.get_text())
             # 'Hazan과 Shaver(1987)', '조명한, 차경호(1998)'처럼 앞 저자가 칸 밖 문장에 있는 경우, '(성인, 이양선, …)'처럼 앞에 다른 말이 낀 경우
-            names = [first_surname(x) for x in re.split(r"\s*(?:,|&|and|·)\s*", re.sub(r"\s*(외|et al\.?)\s*$", "", a)) if x.strip()]
+            names = [first_surname(x) for x in re.split(r"\s*(?:,|&|\band\b|·)\s*", re.sub(r"\s*(외|et al\.?)\s*$", "", a)) if x.strip()]
             prev = c.previous_sibling if isinstance(c.previous_sibling, str) else ""
             m = re.search(r"(?:(?:[가-힣]{2,4}|[A-Z][A-Za-z\-]+)\s*(?:과|와|,|&|and)\s*)+$", prev or "")
             before = re.findall(r"[가-힣]{2,4}(?=\s*(?:과|와|,))|[A-Z][A-Za-z\-]+", m.group(0)) if m else []
@@ -637,6 +637,7 @@ REVIEWER = (
     "가장 중요하게 보는 것은 논문이 일목요연한가입니다: 연구문제 → 선행연구 → 방법 → 결과 → 결론이 하나의 줄기로 이어지는지, "
     "각 장·문단이 그 줄기에 기여하는지, 문단마다 중심 문장이 분명한지. 근거 없이 칭찬하거나 사소한 맞춤법을 지적하지 마세요. "
     "모든 답은 한국어로 씁니다."
+    + llm.OBJECTIVE
 )
 
 
@@ -1028,7 +1029,7 @@ def panel_review(pid, log, stop=lambda: False):
             "- concerns: 지적사항 4~8개. where(P번호나 장 이름), issue(문제), request(연구자에게 요구하는 수정)\n"
             "- decision: 통과/조건부 통과/수정 후 재심/불통과\n"
             "원고가 결과가 없는 연구계획서라면 결과·결론이 없다는 것 자체는 지적하지 마세요. 근거 없이 칭찬하지 마세요.",
-            system=f"당신은 {target}을 여러 번 맡아 본 {role}입니다. 엄격하지만 연구자가 성장하도록 구체적으로 씁니다. 한국어로 답합니다.",
+            system=f"당신은 {target}을 여러 번 맡아 본 {role}입니다. 엄격하지만 연구자가 성장하도록 구체적으로 씁니다. 한국어로 답합니다." + llm.OBJECTIVE,
             schema=REVIEW_SCHEMA,
             num_ctx=12288,
             num_predict=2200,
@@ -1050,7 +1051,7 @@ def panel_review(pid, log, stop=lambda: False):
         "- disagreements: 의견이 갈린 쟁점마다 r1, r2, r3의 입장(한 문장씩, 해당 없으면 의견 없음)과 resolution(위원회의 정리)\n"
         "- verdict: 최종 판정(통과/조건부 통과/수정 후 재심/불통과), verdict_reason: 이유 2문장\n"
         "- required: 연구자가 반드시 고쳐야 할 수정 요구 4~10개 (겹치는 지적은 합치고, by에 제기한 심사위원 번호 1~3)",
-        system="당신은 공정한 심사위원장입니다. 한국어로 답합니다.",
+        system="당신은 공정한 심사위원장입니다. 한국어로 답합니다." + llm.OBJECTIVE,
         schema=DEBATE_SCHEMA,
         num_ctx=12288,
         num_predict=2200,
@@ -1092,7 +1093,7 @@ def panel_respond(pid, responses, log, stop=lambda: False):
         "심사위원회로서 재심사하세요. 각 항목마다 status(해결/부분 해결/미해결)와 comment(왜 그렇게 판단했는지, 남은 요구가 있으면 구체적으로). "
         "답변만 하고 원고에 반영하지 않았으면 부분 해결 이하로 보세요. 수정하지 않는 이유를 설득력 있게 설명했다면 해결로 볼 수 있습니다. "
         "마지막으로 verdict(최종 판정)와 verdict_reason(2문장).",
-        system="당신은 공정하지만 엄격한 심사위원장입니다. 한국어로 답합니다.",
+        system="당신은 공정하지만 엄격한 심사위원장입니다. 한국어로 답합니다." + llm.OBJECTIVE,
         schema=RESPOND_SCHEMA,
         num_ctx=12288,
         num_predict=1800,
