@@ -519,22 +519,137 @@ def _uid():
     return users.uid()
 
 
+_PARTICLES = {"van", "von", "de", "der", "den", "da", "del", "di", "du", "le", "la", "dos", "das"}
+
+
+def apa_name(n):
+    """'Bahar Tunçgenç' → 'Tunçgenç, B.' / 'Emma‐Jane Greig' → 'Greig, E.-J.' / '김명소' 그대로."""
+    n = re.sub(r"\s+", " ", (n or "").strip())
+    if not n or re.match(r"[가-힣]", n):
+        return n.replace(" ", "")
+    if "," in n:
+        last, given = [x.strip() for x in n.split(",", 1)]
+    else:
+        t = n.split(" ")
+        if len(t) == 1:
+            return n
+        k = len(t) - 1
+        while k > 1 and t[k - 1].lower() in _PARTICLES:
+            k -= 1
+        last, given = " ".join(t[k:]), " ".join(t[:k])
+    if last.isupper() and len(last) > 3:  # 'MACKENZIE' → 'Mackenzie'
+        last = last.title()
+    ini = []
+    for g in re.split(r"\s+", given):
+        if not g.strip("."):
+            continue
+        if re.fullmatch(r"(?:[A-Z]\.)+|[A-Z]{1,2}", g):  # 'E.E.A.'·'JM' 같은 이미 이니셜
+            ini += [c + "." for c in g.replace(".", "")]
+        else:
+            ini.append("-".join(p[0].upper() + "." for p in re.split(r"[-‐‑]", g.strip(".")) if p))
+    return f"{last}, {' '.join(ini)}" if ini else last
+
+
+def apa_authors(a):
+    if not a:
+        return "저자미상"
+    if re.match(r"[가-힣]", a[0]):  # 'HaesooKweon'처럼 섞여 들어온 영문 표기는 뺌
+        return ", ".join(x.replace(" ", "") for x in a if re.match(r"[가-힣]", x))
+    n = [apa_name(x) for x in a]
+    if len(n) == 1:
+        return n[0]
+    if len(n) <= 20:
+        return ", ".join(n[:-1]) + ", & " + n[-1]
+    return ", ".join(n[:19]) + ", . . . " + n[-1]
+
+
+def _biblio(doi):
+    """DOI로 학술지·권·호·쪽 (OpenAlex, 한 번 찾으면 저장)."""
+    db.x("CREATE TABLE IF NOT EXISTS biblio(doi TEXT PRIMARY KEY, data TEXT)")
+    r = db.q("SELECT data FROM biblio WHERE doi=?", (doi.lower(),), one=True)
+    if r:
+        return json.loads(r["data"])
+    from . import web
+
+    w = web.openalex_by_doi(doi) or {}
+    d = {k: w.get(k, "") for k in ("venue", "volume", "issue", "first_page", "last_page")}
+    if w:
+        db.x("INSERT OR REPLACE INTO biblio(doi, data) VALUES(?, ?)", (doi.lower(), json.dumps(d, ensure_ascii=False)))
+    return d
+
+
+def _by_title(title, year):
+    """DOI가 없는 논문: 제목+연도로 OpenAlex에서 찾아 확실히 같은 논문일 때만 (제목 90% 이상 일치, 연도 ±1)."""
+    import difflib
+
+    k = "t:" + re.sub(r"\W", "", (title or "").lower())[:80] + ":" + (year or "")[:4]
+    db.x("CREATE TABLE IF NOT EXISTS biblio(doi TEXT PRIMARY KEY, data TEXT)")
+    r = db.q("SELECT data FROM biblio WHERE doi=?", (k,), one=True)
+    if r:
+        return json.loads(r["data"])
+    from . import web
+
+    nz = lambda t: re.sub(r"[^0-9a-z가-힣]", "", (t or "").lower())
+    best = {}
+    for w in web.openalex_search(re.sub(r"\(.*?\)|\[.*", "", title)[:200], n=5):
+        sim = difflib.SequenceMatcher(None, nz(title), nz(w["title"])).ratio()
+        if sim >= 0.9 and (not year or not w["year"] or abs(int(w["year"]) - int(year[:4])) <= 1):
+            best = {x: w.get(x, "") for x in ("doi", "authors", "venue", "volume", "issue", "first_page", "last_page")}
+            break
+    db.x("INSERT OR REPLACE INTO biblio(doi, data) VALUES(?, ?)", (k, json.dumps(best, ensure_ascii=False)))
+    return best
+
+
 def references(chunk_ids):
+    """APA 7판 참고문헌 목록. [{'text': 평문, 'html': 기울임 포함}] — 모르는 정보는 '[확인 필요]'로 표시."""
+    import html as _h
+
     ids = list({int(c) for c in chunk_ids if str(c).isdigit()})
     if not ids:
         return []
     rows = db.q(
         f"SELECT DISTINCT p.* FROM papers p JOIN chunks c ON c.paper_id=p.id WHERE c.id IN ({','.join('?' * len(ids))}) AND COALESCE(p.user_id,0)=?", ids + [_uid()]
     )
-    out = []
+    out, seen = [], set()
     for p in rows:
+        key = (re.sub(r"\W", "", (p["title"] or "").lower())[:60], (p["year"] or "")[:4])
+        if key in seen:  # 같은 논문 사본이 여러 폴더에 있어도 한 번만
+            continue
+        seen.add(key)
         a = json.loads(p["authors"] or "[]")
-        ko = bool(a and re.match(r"[가-힣]", a[0]))
-        auth = ", ".join(a[:7]) + (" 외" if ko and len(a) > 7 else (", et al." if len(a) > 7 else "")) if a else "저자미상"
-        ref = f"{auth} ({p['year'] or 'n.d.'}). {p['title']}."
-        if p.get("venue"):
-            ref += f" {p['venue']}."
+        ko = bool(a and re.match(r"[가-힣]", a[0])) or bool(re.search(r"[가-힣]", p["title"] or "") and not a)
+        b = {}
+        try:
+            if p.get("doi"):
+                b = _biblio(p["doi"])
+            elif not ko and p["title"]:  # DOI가 없는 영어 논문 → 제목으로 찾아 보충
+                b = _by_title(p["title"], p["year"] or "")
+                if b.get("doi"):
+                    p["doi"] = b["doi"]
+                if b.get("authors") and all(" " not in x and "," not in x for x in a):  # 성만 있던 저자 → 이니셜까지
+                    a = b["authors"]
+        except Exception:
+            b = {}
+        venue = (b.get("venue") or p.get("venue") or "").strip()
+        vol, iss = str(b.get("volume") or ""), str(b.get("issue") or "")
+        fp, lp = str(b.get("first_page") or ""), str(b.get("last_page") or "")
+        pages = f"{fp}–{lp}" if fp and lp and fp != lp else fp
+        title = (p["title"] or "제목 미상").strip().rstrip(".")
+        head = f"{apa_authors(a)} ({(p['year'] or '')[:4] or ('연도미상' if ko else 'n.d.')}). {title}{'' if title[-1:] in '?!' else '.'}"
+        t, h = head, _h.escape(head)
+        if venue:
+            vi = f"{venue}, {vol}" if vol else venue
+            t += f" {vi}" + (f"({iss})" if iss else "") + (f", {pages}" if pages else "") + "."
+            h += f" <i>{_h.escape(vi)}</i>" + (f"({_h.escape(iss)})" if iss else "") + (f", {_h.escape(pages)}" if pages else "") + "."
         if p.get("doi"):
-            ref += f" https://doi.org/{p['doi']}"
-        out.append(ref)
-    return sorted(out)
+            d = f" https://doi.org/{p['doi']}"
+            t += d
+            h += _h.escape(d)
+        book = bool(re.search(r"press|books?\b|publish|출판|학지사|집문당", venue, re.I))  # 책은 권·쪽이 없음
+        miss = "학술지명(또는 출판사)·권(호)·쪽" if not venue else ("권(호)·쪽" if not (vol and pages) and not book else "")
+        if miss:
+            t += f" [확인 필요: {miss}]"
+            h += f' <span class="ref-miss">[확인 필요: {miss}]</span>'
+        out.append({"text": t, "html": h, "ko": ko})
+    out.sort(key=lambda r: (not r["ko"], r["text"].lower()))  # 한국어 문헌 먼저, 그다음 영어 (가나다·알파벳순)
+    return [{"text": r["text"], "html": r["html"]} for r in out]

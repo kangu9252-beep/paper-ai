@@ -389,3 +389,4 @@ body.guest #approveNight, body.guest #fullNight, body.guest .owner-only, body.gu
 .login { width: 100%; max-width: 380px; }
 .tbl { border-collapse: collapse; width: 100%; } .tbl th, .tbl td { text-align: left; padding: 4px 6px; border-bottom: 1px solid var(--line); }
 .fp-tip { background: #eef6ff; border: 1px solid #cfe3fb; border-radius: 8px; padding: 6px 10px; }
+.ref-miss { color: #b45309; font-size: 0.9em; }

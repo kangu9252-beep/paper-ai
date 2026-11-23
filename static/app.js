@@ -1483,7 +1483,8 @@ async function makeRefs() {
   if (!ids.length) return toast("연결된 인용이 아직 없어요");
   const refs = await api("/api/references", { json: { chunks: ids } });
   $$("[data-refs]", editor).forEach((e) => e.remove());
-  editor.insertAdjacentHTML("beforeend", `<h2 data-refs="1">참고문헌</h2><div data-refs="1">${refs.map((r) => `<p style="padding-left:2em;text-indent:-2em">${esc(r)}</p>`).join("")}</div>`);
+  editor.insertAdjacentHTML("beforeend", `<h2 data-refs="1">참고문헌</h2><div data-refs="1">${refs.map((r) => `<p style="padding-left:2em;text-indent:-2em">${typeof r === "string" ? esc(r) : r.html}</p>`).join("")}</div>`);
+  if (refs.some((r) => (r.text || r).includes("[확인 필요"))) toast("‘[확인 필요]’ 항목은 학술지·권(호)·쪽을 원문에서 확인해 채워 주세요", 5000);
   scheduleSave();
   layoutMemos();
 }
