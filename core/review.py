@@ -461,18 +461,25 @@ def uncited_claims(pid, log, stop=lambda: False):
                 temperature=0,
             )
             need_idx = sorted({int(n) - 1 for n in r.get("need", []) if 0 < int(n) <= len(segs)}, reverse=True)
-            for i in need_idx:  # 뒤에서부터 넣어야 위치가 안 밀림
-                node, at, sent = segs[i]
-                s = str(node)
-                new = BeautifulSoup(f'{html.escape(s[:at].rstrip())} <span class="cite need" contenteditable="false" data-auto="1">(출처 필요)</span>{html.escape(s[at:])}', "html.parser")
-                sp = new.find("span")
-                sug = _suggest(sent)
-                if sug:
-                    sp["data-sug-chunk"], sp["data-sug-quote"], sp["data-sug-label"] = str(sug["id"]), sug["quote"], sug["cite"]
-                    sp["data-note"] = f"추천 근거: {sug['cite']}"
-                node.replace_with(new)
-                flagged += 1
-                items.append({"sentence": sent[:200], "section": title, "suggest": sug["cite"] if sug else ""})
+            # 한 글 조각에 표시할 문장이 여러 개면 한꺼번에 넣는다 (하나씩 바꾸면 두 번째부터 이미 떼어 낸 조각을 가리켜 오류)
+            by_node = {}
+            for i in need_idx:
+                by_node.setdefault(id(segs[i][0]), (segs[i][0], []))[1].append(segs[i])
+            for node, lst in by_node.values():
+                s, out, end = str(node), "", None
+                for _, at, sent in sorted(lst, key=lambda x: -x[1]):  # 뒤에서부터 넣어야 위치가 안 밀림
+                    sug = _suggest(sent)
+                    attrs = ""
+                    if sug:
+                        attrs = (f' data-sug-chunk="{sug["id"]}" data-sug-quote="{html.escape(sug["quote"])}" data-sug-label="{html.escape(sug["cite"])}"'
+                                 f' data-note="{html.escape("추천 근거: " + sug["cite"])}"')
+                    piece = s[at:end] if end is None else s[at:end].rstrip()  # 다음 표시 앞 공백은 표시에서 한 칸만
+                    out = f' <span class="cite need" contenteditable="false" data-auto="1"{attrs}>(출처 필요)</span>' + html.escape(piece) + out
+                    end = at
+                    s_head = s[:at].rstrip()
+                    flagged += 1
+                    items.append({"sentence": sent[:200], "section": title, "suggest": sug["cite"] if sug else ""})
+                node.replace_with(BeautifulSoup(html.escape(s_head) + out, "html.parser"))
             log(f"  '{title or '본문'}' 문단 검사: {len(need_idx)}곳 표시")
     all_cites(soup)
     save(pid, soup)
