@@ -617,7 +617,7 @@ def _users():
 def find_papers_by_cite(author, year):
     """'(이기태, 2026)' 같은 표기에서 해당 논문 후보를 라이브러리에서 찾는다."""
     author = re.sub(r"\s*(외|et al\.?|등)\s*$", "", author.strip())
-    first = re.split(r"\s*(?:,|&|and|·)\s*", author)[0].strip()
+    first = re.split(r"\s*(?:,|&|\band\b|·)\s*", author)[0].strip()
     out = []
     allowed = scope_ids()
     allowed = set(allowed) if allowed is not None else None
@@ -635,6 +635,49 @@ def find_papers_by_cite(author, year):
             out.append(p)
     return out
 
+
+def find_mentions(author, year, sent="", limit=3):
+    """원문 PDF가 없는 문헌을 내 자료의 다른 논문이 언급한 곳(재인용 후보). AI 없이 글자 검색.
+    첫 저자 이름이 연도 가까이 나오면 후보(다른 저자 이름이 함께 나오면 점수 더함).
+    같은 논문 안에 여러 번 나오면 내 문장(sent)과 낱말이 가장 많이 겹치는 곳을 고른다."""
+    author = re.sub(r"\s*(외|et al\.?|등)\s*$", "", (author or "").strip())
+    names = []
+    for n in re.split(r"\s*(?:,|&|\band\b|·)\s*", author):
+        n = n.strip()
+        n = n.replace(" ", "") if re.match(r"[가-힣]", n) else (n.split()[-1] if n.split() else "")
+        if len(n) >= 2 and n not in names:
+            names.append(n)
+    if not names or not year:
+        return []
+    y = year[:4]
+    allowed = scope_ids()
+    allowed = set(allowed) if allowed is not None else None
+    own = {p["id"] for p in find_papers_by_cite(author, year)}
+    toks = lambda s: {x for x in re.findall(r"[가-힣]{2,}|[A-Za-z]{3,}", s or "")}
+    mine = toks(sent)
+    best = {}  # 문헌마다 가장 잘 맞는 곳 하나
+    for first in names[:1]:  # 첫 저자로만 찾음 (둘째 저자만 같은 다른 논문이 걸리지 않게), 나머지 이름은 점수에만
+        ko = bool(re.match(r"[가-힣]", first))
+        # 영어 성은 낱말 단위('Rom'이 'Segerstrom'에 걸리지 않게), 한글 이름은 OCR에서 조사와 붙어 나오므로 그대로
+        name = re.escape(first) if ko else r"(?<![A-Za-z])" + re.escape(first) + r"(?![a-z])"
+        near = re.compile(name + r"[^()\n]{0,60}?" + y + r"|" + name + r"[\s\S]{0,40}?\(\s*" + y, 0 if ko else re.I)
+        for c in db.q("SELECT c.id, c.paper_id, c.page, c.text, p.authors, p.year FROM chunks c JOIN papers p ON p.id=c.paper_id "
+                      "WHERE p.status='ok' AND c.text LIKE ? AND c.text LIKE ?", (f"%{first}%", f"%{y}%")):
+            if c["paper_id"] in own or (allowed is not None and c["paper_id"] not in allowed):
+                continue
+            flat = re.sub(r"\s+", " ", c["text"])
+            for m in near.finditer(flat):
+                s = max(flat.rfind(". ", 0, m.start()) + 2, m.start() - 160, 0)
+                e = flat.find(". ", m.end())
+                e = len(flat) if e < 0 else min(e + 1, m.end() + 200)
+                q = flat[s:e].strip()
+                au = json.loads(c["authors"] or "[]")
+                cite = cite_label(au, c["year"] or "")
+                score = len(mine & toks(q)) + sum(1 for n in names if n.lower() in q.lower())
+                key = ((_surname(au[0]) if au else ""), (c["year"] or "")[:4])  # 같은 논문 사본 여러 개는 하나로
+                if key not in best or score > best[key]["score"] or (score == best[key]["score"] and len(au) > 2 and "외" in cite):
+                    best[key] = {"chunk_id": c["id"], "paper_id": c["paper_id"], "page": c["page"], "quote": q, "cite": cite, "score": score}
+    return sorted(best.values(), key=lambda x: -x["score"])[:limit]
 
 # ---------- 근거 위치 ----------
 def _norm(s):

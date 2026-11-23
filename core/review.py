@@ -20,6 +20,10 @@ PART_RE = re.compile(r"^\s*([^,;()\d][^;()]*?),?\s+(" + YEAR + r")(?:\s*,\s*pp?\
 NARR_RE = re.compile(
     r"((?<![가-힣A-Za-z0-9])[가-힣]{2,4}(?:\s?외)?|[A-Z][A-Za-z\-']+(?:\s(?:et al\.|&\s[A-Z][A-Za-z\-']+|and\s[A-Z][A-Za-z\-']+))?)\s?\((" + YEAR + r")\)"
 )
+# 서술형 재인용: 조명한, 차경호(1998: 김명소 외, 2001에서 재인용)
+NARR2_RE = re.compile(
+    r"((?<![가-힣A-Za-z0-9])[가-힣]{2,4}(?:,\s?[가-힣]{2,4})*(?:\s?외)?|[A-Z][A-Za-z\-']+(?:\s(?:et al\.|&\s[A-Z][A-Za-z\-']+|and\s[A-Z][A-Za-z\-']+))?)\s?\((" + YEAR + r")\s*(?:[:;][^()]*?에서\s*재인용|[;,]\s*as cited in[^()]*?)\)"
+)
 SKIP_HEAD = re.compile(r"연구\s*방법|방법|결과|results?|methods?|참고\s*문헌|references?|부록|appendix|abstract|초록|목차", re.I)
 REF_HEAD = re.compile(r"참\s*고\s*문\s*헌|references?|bibliography|인용\s*문헌", re.I)
 RESULT_HEAD = re.compile(r"결과|results?", re.I)
@@ -86,7 +90,10 @@ def mark_cites_text(escaped):
     """HTML 이스케이프된 문단 텍스트 안의 인용 표기를 인용 칸(span)으로 바꾼다."""
 
     def paren(m):
-        parts = html.unescape(m.group(1)).split(";")
+        raw = html.unescape(m.group(1))
+        if SECONDARY_RE.search("(" + raw + ")"):  # 재인용 표기는 통째로 한 칸
+            return span(m.group(0)) if PART_RE.match(SECONDARY_RE.sub("", "(" + raw + ")")[1:-1]) else m.group(0)
+        parts = raw.split(";")
         if not all(PART_RE.match(x) for x in parts):
             return m.group(0)
         if len(parts) == 1:
@@ -96,6 +103,9 @@ def mark_cites_text(escaped):
     out = PAREN_RE.sub(paren, escaped)
     # 서술형 인용은 이미 만든 span 밖에서만
     pieces = re.split(r"(<span[^>]*>.*?</span>)", out)
+    for i in range(0, len(pieces), 2):
+        pieces[i] = NARR2_RE.sub(lambda m: span(m.group(0)), pieces[i])
+    pieces = re.split(r"(<span[^>]*>.*?</span>)", "".join(pieces))
     for i in range(0, len(pieces), 2):
         pieces[i] = NARR_RE.sub(lambda m: span(m.group(0)), pieces[i])
     return "".join(pieces)
@@ -191,8 +201,30 @@ def sections(soup):
 PLACEHOLDER = re.compile(r"^\W*$|출처\s*필요|저자\s*미상|연도\s*미상")
 
 
+# 재인용: (조명한, 차경호, 1998: 김명소 외, 2001에서 재인용) / 조명한(1998; 김명소 외, 2001에서 재인용) / (Smith, 1990, as cited in Lee, 2001)
+SECONDARY_RE = re.compile(r"\s*(?:[:;]\s*|,\s*(?=as cited in))(?:as cited in\s+([^()]+?)|([^():;]+?)\s*에서\s*재인용)\s*(?=\)|$)", re.I)
+
+
+def secondary(label):
+    """재인용 표기면 실제로 읽은 문헌의 (저자, 연도), 아니면 ("", "")."""
+    m = SECONDARY_RE.search(label or "")
+    if not m:
+        return "", ""
+    a, y = parse_label("(" + (m.group(1) or m.group(2)).strip() + ")")
+    return a, y
+
+
+def secondary_label(label, sec_cite):
+    """'(조명한, 차경호, 1998)' + '(김명소 외, 2001)' → '(조명한, 차경호, 1998: 김명소 외, 2001에서 재인용)'."""
+    inner = sec_cite.strip().strip("()")
+    t = SECONDARY_RE.sub("", label.strip())
+    eng = not re.search(r"[가-힣]", t + inner)
+    tail = f", as cited in {inner}" if eng else f": {inner}에서 재인용"
+    return t[:-1] + tail + ")" if t.endswith(")") else t + tail
+
+
 def parse_label(label):
-    t = label.strip()
+    t = SECONDARY_RE.sub("", label.strip())
     m = re.match(r"^\(?\s*(.+?)\s*,\s*(" + YEAR + r"|연도미상)(?:\s*,\s*pp?\.\s*[\d\-–]+)?\s*\)?$", t) or re.match(
         r"^(.+?)\s?\((" + YEAR + r")\)$", t
     )
@@ -265,6 +297,9 @@ def set_state(c, state, note=""):
     if state in ("need", "warn"):
         cls.append(state)
     c["class"] = cls
+    if state is None:  # 근거 확인됨 → 예전 추천 근거 표시는 지움
+        for k in [k for k in c.attrs if k.startswith("data-sug-")]:
+            del c[k]
     if note:
         c["data-note"] = note
     elif c.has_attr("data-note"):
@@ -285,6 +320,9 @@ def check_citations(pid, log, stop=lambda: False, use_internet=True):
         if label.strip() == "(출처 필요)":
             continue
         author, year = parse_label(label)
+        sa, sy = secondary(label)
+        if sa and not (author and pdfindex.find_papers_by_cite(author, year)):
+            author, year = sa, sy  # 재인용: 원문이 없으면 실제로 읽은 문헌에서 근거를 찾는다
         sent = cite_sentence(c)
         log(f"[{i + 1}/{len(cites)}] {label}")
         item = {"cid": c["data-cid"], "label": label, "sentence": sent[:200]}
@@ -327,14 +365,39 @@ def check_citations(pid, log, stop=lambda: False, use_internet=True):
                 else:
                     set_state(c, None)
                     item["status"], item["note"] = "ok", "근거 위치를 찾아 연결함"
-            elif r and r.get("status") == "alternative":
-                c["data-sug-chunk"], c["data-sug-quote"], c["data-sug-label"] = str(r["chunk_id"]), r.get("quote", ""), r["cite"]
-                set_state(c, "need", f"인용한 논문에서는 못 찾음 — 다른 자료 {r['cite']}에 근거 있음")
-                item["status"], item["note"] = "need", f"대신 {r['cite']}에 근거"
             else:
                 has = bool(author and pdfindex.find_papers_by_cite(author, year))
-                set_state(c, "need", "논문은 있지만 이 내용을 찾지 못함" if has else "이 논문 PDF가 내 자료에 없음")
-                item["status"], item["note"] = "need", ("논문 안에서 근거 못 찾음" if has else "PDF 없음")
+                # 원문 PDF는 없지만 다른 논문이 이 문헌을 언급 → '다른 자료로 바꾸기'보다 재인용을 먼저 제안
+                # '조명한, 차경호(1998)'처럼 앞 저자가 칸 밖에 있으면 그 이름도 함께 찾는다
+                prev = c.previous_sibling if isinstance(c.previous_sibling, str) else ""
+                mb = re.search(r"(?:(?:[가-힣]{2,4}|[A-Z][A-Za-z\-]+)\s*(?:과|와|,|&|and)\s*)+$", prev or "")
+                before = re.findall(r"[가-힣]{2,4}(?=\s*(?:과|와|,))|[A-Z][A-Za-z\-]+", mb.group(0)) if mb else []
+                men = [] if has or not author or sa else pdfindex.find_mentions(", ".join(before + [author]), year, sent)
+                if men:
+                    alt_pid = None
+                    if r and r.get("status") == "alternative":
+                        row = db.q("SELECT paper_id FROM chunks WHERE id=?", (r["chunk_id"],), one=True)
+                        alt_pid = row and row["paper_id"]
+                    cited = {(first_surname(a2), y2[:4]) for x in cites for a2, y2 in (parse_label(x.get_text()), secondary(x.get_text())) if a2}
+
+                    def in_ms(x):  # 이미 원고에 인용한(참고문헌에 있는) 논문이면 우선
+                        a2, y2 = parse_label(x["cite"])
+                        return (first_surname(a2), y2[:4]) in cited
+
+                    mm = max(men, key=lambda x: (in_ms(x), x["score"], x["paper_id"] == alt_pid))
+                    c["data-sug-chunk"], c["data-sug-quote"], c["data-sug-secondary"] = str(mm["chunk_id"]), mm["quote"], "1"
+                    c["data-sug-label"] = secondary_label(label, mm["cite"])
+                    set_state(c, "need", f"원문 PDF가 없어요. {mm['cite']} {mm['page'] + 1}쪽에서 이 문헌을 언급해요 — 재인용으로 쓸 수 있어요")
+                    item["status"], item["note"] = "need", f"PDF 없음 · 재인용 후보 {mm['cite']}"
+                elif r and r.get("status") == "alternative":
+                    c["data-sug-chunk"], c["data-sug-quote"], c["data-sug-label"] = str(r["chunk_id"]), r.get("quote", ""), r["cite"]
+                    if c.has_attr("data-sug-secondary"):
+                        del c["data-sug-secondary"]
+                    set_state(c, "need", f"인용한 논문에서는 못 찾음 — 다른 자료 {r['cite']}에 근거 있음")
+                    item["status"], item["note"] = "need", f"대신 {r['cite']}에 근거"
+                else:
+                    set_state(c, "need", "논문은 있지만 이 내용을 찾지 못함" if has else "이 논문 PDF가 내 자료에 없음")
+                    item["status"], item["note"] = "need", ("논문 안에서 근거 못 찾음" if has else "PDF 없음")
         ok += item["status"] == "ok"
         warn += item["status"] == "warn"
         need += item["status"] == "need"
@@ -589,9 +652,14 @@ def check_references(pid, log, stop=lambda: False):
     for t in refs:
         a, y = parse_ref(t)
         ref_keys.append({"text": t[:200], "author": a, "year": y})
-    cites, alts = {}, {}
+    cites, alts, optional = {}, {}, set()
     for c in soup.find_all("span", class_="cite"):
         a, y = parse_label(c.get_text())
+        sa, sy = secondary(c.get_text())
+        if sa:  # 재인용: 실제로 읽은 문헌은 목록에 꼭, 원문은 있어도 되고 없어도 됨(APA)
+            cites.setdefault((first_surname(sa), sy[:4]), c.get_text())
+            if a:
+                optional.add((first_surname(a), y[:4]))
         if a:
             key = (first_surname(a), y[:4])
             cites.setdefault(key, c.get_text())
@@ -612,6 +680,8 @@ def check_references(pid, log, stop=lambda: False):
             hit = [i for i, r in enumerate(ref_keys) if r["year"] and r["year"][:4] == y and any(same(x, r["author"]) for x in alts.get((a, y), ()))]
         if hit:
             used.update(hit)
+            continue
+        if (a, y) in optional:
             continue
         other = [r for r in ref_keys if same(a, r["author"])]
         if other:

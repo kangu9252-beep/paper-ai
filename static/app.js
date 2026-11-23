@@ -1280,8 +1280,10 @@ function detectCites(force) {
   if (changed) { layoutMemos(); scheduleSave(); }
 }
 
+// 재인용 꼬리 '…: 김명소 외, 2001에서 재인용' / ', as cited in Lee, 2001' 는 빼고 원문 저자·연도만
+const SECONDARY_RE = /\s*(?:[:;]\s*|,\s*(?=as cited in))(?:as cited in\s+[^()]+?|[^():;]+?\s*에서\s*재인용)\s*(?=\)|$)/i;
 function parseLabel(label) {
-  const t = label.trim();
+  const t = label.trim().replace(SECONDARY_RE, "");
   const m = t.match(/^\(?\s*(.+?)\s*,\s*((?:19|20)\d{2}[a-z]?|연도미상)(?:\s*,\s*pp?\.\s*[\d\-–]+)?\s*\)?$/) || t.match(/^(.+?)\s?\(((?:19|20)\d{2}[a-z]?)\)$/);
   return m ? { author: m[1].trim(), year: m[2] === "연도미상" ? "" : m[2] } : { author: "", year: "" };
 }
@@ -1346,8 +1348,9 @@ function layoutMemos() {
     m.style.top = y + "px";
     const msg = citeMsg.get(c) || "";
     const note = c.dataset.note || "";
-    const sug = c.dataset.sugChunk ? `<div class="sug">추천 근거: <b>${esc(c.dataset.sugLabel)}</b>
-        <div class="row"><button data-a="sugview">미리보기</button><button class="primary" data-a="sugapply">이 근거 적용</button></div></div>` : "";
+    const sec = c.dataset.sugSecondary === "1";
+    const sug = c.dataset.sugChunk ? `<div class="sug">${sec ? `${esc(note)}<br>바꿀 표기: ` : "추천 근거: "}<b>${esc(c.dataset.sugLabel)}</b>
+        <div class="row"><button data-a="sugview">미리보기</button><button class="primary" data-a="sugapply">${sec ? "재인용으로 바꾸기" : "이 근거 적용"}</button></div></div>` : "";
     m.innerHTML = warn
       ? `<span class="dot"><b>⚠</b>내용 확인</span>
       <div class="box"><div class="lbl">${esc(c.textContent)}</div>
@@ -1371,8 +1374,9 @@ function layoutMemos() {
     on("sugview", () => showEvidence({ chunk: c.dataset.sugChunk, quote: c.dataset.sugQuote }));
     on("sugapply", () => {
       const hit = { chunk_id: c.dataset.sugChunk, quote: c.dataset.sugQuote };
-      const label = parseLabel(c.textContent).author ? null : c.dataset.sugLabel;
-      ["sugChunk", "sugQuote", "sugLabel", "note", "auto"].forEach((k) => delete c.dataset[k]);
+      // 재인용 제안은 내가 쓴 저자는 그대로 두고 '…에서 재인용'만 붙인 표기라 바꿔도 됨
+      const label = c.dataset.sugSecondary === "1" || !parseLabel(c.textContent).author ? c.dataset.sugLabel : null;
+      ["sugChunk", "sugQuote", "sugLabel", "sugSecondary", "note", "auto"].forEach((k) => delete c.dataset[k]);
       linkCite(c, hit, label);
     });
     bottom = y + m.offsetHeight;
