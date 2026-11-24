@@ -36,7 +36,10 @@ SERVER_MODE = bool(os.environ.get("PAPER_AI_SERVER"))  # 인터넷 서버에 올
 def is_remote(request):
     if SERVER_MODE:
         return True
-    return bool(request.headers.get("cf-connecting-ip")) or (request.url.hostname or "") not in ("127.0.0.1", "localhost")
+    h = request.headers  # 터널(Cloudflare·ngrok)을 거쳐 온 요청은 항상 친구로
+    if h.get("cf-connecting-ip") or h.get("x-forwarded-for") or h.get("ngrok-trace-id") or h.get("x-forwarded-host"):
+        return True
+    return (request.url.hostname or "") not in ("127.0.0.1", "localhost")
 
 
 @app.middleware("http")
