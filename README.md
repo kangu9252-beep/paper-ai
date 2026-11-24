@@ -104,7 +104,7 @@ AI를 숨기지 않고, 어디에 어떻게 썼는지 밝힐 수 있게 하는 �
 
 앱을 켠 컴퓨터를 웹 주소로 열어 친구들과 함께 쓸 수 있습니다.
 
-1. 앱을 켠 뒤 `web-share.bat`을 실행하면 `https://....trycloudflare.com` 주소가 생깁니다. (Cloudflare 무료 터널, [cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/) 설치 필요)
+1. [ngrok](https://ngrok.com)(무료)에 가입해 토큰을 등록한 뒤 `web-share.bat`을 실행하면, 매번 같은 `https://....ngrok-free.dev` 주소로 앱이 열립니다.
 2. 친구는 그 주소에서 **초대 코드**(⚙ 설정 → 친구 초대)로 가입합니다.
 3. 친구는 **자기 Claude 키**로 쓰고, **자기 원고와 PDF만** 볼 수 있습니다. 앱을 켠 사람의 폴더·설정·자료는 보이지 않습니다.
 
