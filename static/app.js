@@ -1006,8 +1006,7 @@ async function chooseRefFolders(after) {
   const p = S.cur;
   folderPicker({
     title: "📁 이 논문이 참조할 폴더",
-    hint: "⚠ 이 논문과 관련된 논문만 모아 둔 폴더를 골라 주세요. 드라이브 전체나 큰 폴더를 고르면 상관없는 PDF까지 다 읽느라 비용(Claude 사용료)과 시간이 많이 들어요. 고른 폴더 안의 PDF에서만 근거를 찾고, 하위 폴더까지 함께 읽어요.
-💡 가능하시다면 이 논문의 자료를 한 폴더에 모아 넣어 주시는 것을 추천드립니다. 흩어져 있으면 있는 논문도 못 찾을 수 있어요.",
+    hint: "⚠ 이 논문과 관련된 논문만 모아 둔 폴더를 골라 주세요. 드라이브 전체나 큰 폴더를 고르면 상관없는 PDF까지 다 읽느라 비용(Claude 사용료)과 시간이 많이 들어요. 고른 폴더 안의 PDF에서만 근거를 찾고, 하위 폴더까지 함께 읽어요. 💡 가능하시다면 이 논문의 자료를 한 폴더에 모아 넣어 주시는 것을 추천드립니다. 흩어져 있으면 있는 논문도 못 찾을 수 있어요.",
     selected: p.ref_folders || [],
     cover: await api(`/api/projects/${p.id}/cite_folders`).catch(() => null),
     onSave: async (sel) => {
@@ -2236,7 +2235,9 @@ function showLogin() {
       ${mode === "signup" ? `<label class="field"><span>초대 코드 (앱 주인에게 받은 6자리)</span><input id="lgCode" style="text-transform:uppercase"></label>` : ""}
       <p id="lgMsg" class="small" style="color:var(--warn);min-height:1.2em"></p>
       <button class="primary" id="lgGo" style="width:100%">${mode === "login" ? "로그인" : "가입하고 시작하기"}</button>
-      <p class="small muted" style="margin-top:12px">각자 자기 Claude API 키로 사용해요. 내 원고와 PDF는 나만 볼 수 있어요.</p></div>`;
+      <p class="small muted" style="margin-top:12px">각자 자기 Claude API 키로 사용해요. 내 원고와 PDF는 나만 볼 수 있어요.</p>
+      <p class="small server-note" hidden style="margin-top:8px;color:var(--warn)">⚠ 무료 체험판이에요. 서버가 쉬었다가 다시 켜지면 가입 정보와 올린 자료가 지워질 수 있어요. 원고는 꼭 내 컴퓨터에도 보관해 주세요.</p></div>`;
+    api("/api/auth/info").then((i) => { if (i.server) $(".server-note", d).hidden = false; }).catch(() => {});
     $$("[data-m]", d).forEach((b) => (b.onclick = () => { mode = b.dataset.m; draw(); }));
     const go = async () => {
       const body = { login: $("#lgId", d).value, password: $("#lgPw", d).value };
