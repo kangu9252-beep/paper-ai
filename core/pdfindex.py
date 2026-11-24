@@ -33,8 +33,51 @@ def is_reflist(text):
 OCR_DPI = 200
 
 
+def _ocr_tesseract(page):
+    """서버(리눅스)용: tesseract(한국어+영어)로 줄과 위치."""
+    try:
+        import io as _io
+
+        import pytesseract
+        from PIL import Image
+    except Exception:
+        return []
+    pix = page.get_pixmap(dpi=OCR_DPI)
+    try:
+        d = pytesseract.image_to_data(Image.open(_io.BytesIO(pix.tobytes("png"))), lang="kor+eng", output_type=pytesseract.Output.DICT)
+    except Exception:
+        return []
+    k = 72 / OCR_DPI
+    lines, order = {}, []
+    for i, w in enumerate(d["text"]):
+        if not (w or "").strip():
+            continue
+        key = (d["block_num"][i], d["par_num"][i], d["line_num"][i])
+        if key not in lines:
+            lines[key] = []
+            order.append(key)
+        lines[key].append(i)
+    out, prev_par = [], None
+    for key in order:
+        ids = lines[key]
+        t = " ".join(d["text"][i].strip() for i in ids)
+        x0 = min(d["left"][i] for i in ids) * k
+        y0 = min(d["top"][i] for i in ids) * k
+        x1 = max(d["left"][i] + d["width"][i] for i in ids) * k
+        y1 = max(d["top"][i] + d["height"][i] for i in ids) * k
+        if prev_par is not None and key[:2] != prev_par:
+            out.append(None)
+        out.append((t, (x0, y0, x1, y1)))
+        prev_par = key[:2]
+    return out
+
+
 def _ocr_lines(page):
     """스캔본 쪽: Windows 내장 글자 인식(한국어)으로 줄과 위치를 얻는다. 못 하면 []."""
+    import sys as _sys
+
+    if _sys.platform != "win32":
+        return _ocr_tesseract(page)
     try:
         import io as _io
 

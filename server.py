@@ -30,7 +30,12 @@ OWN_PROJECT = re.compile(r"^/api/projects/(\d+)")
 OWN_PAPER = re.compile(r"^/api/(?:papers|paper|page|pdf)/(\d+)")
 
 
+SERVER_MODE = bool(os.environ.get("PAPER_AI_SERVER"))  # 인터넷 서버에 올렸을 때: 모두 가입한 사용자로
+
+
 def is_remote(request):
+    if SERVER_MODE:
+        return True
     return bool(request.headers.get("cf-connecting-ip")) or (request.url.hostname or "") not in ("127.0.0.1", "localhost")
 
 
@@ -561,6 +566,11 @@ def lib_login():
 COOKIE = "pa_session"
 
 
+@app.get("/api/auth/info")
+def auth_info():
+    return {"server": SERVER_MODE}
+
+
 @app.post("/api/auth/signup")
 def auth_signup(d: dict = Body(...)):
     try:
@@ -578,7 +588,8 @@ def auth_login(d: dict = Body(...), request: Request = None):
     except ValueError as e:
         raise HTTPException(400, str(e))
     r = JSONResponse({"ok": True})
-    r.set_cookie(COOKIE, tok, max_age=30 * 86400, httponly=True, secure=True, samesite="lax")
+    # 허깅페이스는 앱을 다른 페이지 안(iframe)에 띄우기도 해서 서버 모드에서는 SameSite=None
+    r.set_cookie(COOKIE, tok, max_age=30 * 86400, httponly=True, secure=True, samesite="none" if SERVER_MODE else "lax")
     return r
 
 
@@ -880,6 +891,9 @@ if __name__ == "__main__":
 
     import os
 
+    if SERVER_MODE:  # 인터넷 서버: 새벽 예약·브라우저 열기 없음
+        uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 7860)), log_level="warning", proxy_headers=True, forwarded_allow_ips="*")
+        sys.exit()
     night.start_scheduler()
     if not os.environ.get("NO_BROWSER") and "--night" not in sys.argv:
         threading.Timer(1.5, lambda: webbrowser.open("http://127.0.0.1:8765")).start()

@@ -8,6 +8,8 @@ python-multipart
 anthropic
 beautifulsoup4
 python-docx
-winocr
+winocr; sys_platform == "win32"
 pillow
 fastembed
+cryptography
+pytesseract

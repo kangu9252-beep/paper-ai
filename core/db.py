@@ -1,11 +1,12 @@
 """SQLite 저장소: 논문(PDF), 문단 조각(chunk), 집필 프로젝트, 설정."""
 import json
+import os
 import sqlite3
 import threading
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-DATA = ROOT / "data"
+DATA = Path(os.environ["PAPER_AI_DATA"]) if os.environ.get("PAPER_AI_DATA") else ROOT / "data"
 PAPERS_DIR = DATA / "papers"
 DATA.mkdir(exist_ok=True)
 PAPERS_DIR.mkdir(exist_ok=True)

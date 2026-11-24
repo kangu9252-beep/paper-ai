@@ -51,6 +51,10 @@ def _hash(pw, salt):
 
 
 def invite_code():
+    import os
+
+    if os.environ.get("INVITE_CODE"):
+        return os.environ["INVITE_CODE"].strip().upper()
     s = db.get_settings()
     code = s.get("invite_code")
     if not code:

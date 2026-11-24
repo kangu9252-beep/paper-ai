@@ -184,7 +184,7 @@ def _embed_builtin(texts):
         if _builtin["m"] is None:
             from fastembed import TextEmbedding
 
-            cache = Path(__file__).resolve().parent.parent / "data" / "models"
+            cache = db.DATA / "models"
             cache.mkdir(parents=True, exist_ok=True)
             _builtin["m"] = TextEmbedding(BUILTIN_MODEL, cache_dir=str(cache))
         v = np.array(list(_builtin["m"].embed([t[:2000] for t in texts], batch_size=32)), dtype=np.float32)
