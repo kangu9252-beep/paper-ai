@@ -982,6 +982,7 @@ FEATURES = {
     "uncited": ("근거 없는 문장 찾기", "cite"),
     "structure": ("예비심사 리뷰(구조 점검)", "struct"),
     "write": ("본문 초안 작성", "draft"),
+    "draft": ("이어 쓰기·메모를 문단으로 풀기", "draft"),
     "discuss": ("논의 보강 제안", "draft"),
     "discuss_insert": ("AI 제안 문장을 논의에 넣음", "draft"),
     "matrix": ("문헌분석표 만들기", "lit"),

@@ -403,6 +403,7 @@ RUN_TOOLS = {
     "matrix": ("원고에 인용된 논문으로 문헌분석표 만들기(최대 10편)", "matrix"),
     "gaps": ("연구 공백 찾기", "matrix"),
     "intro": ("서론 초안 쓰기", "matrix"),
+    "write": ("연구계획 목차대로 장 전체 AI 집필(원고 끝에 덧붙임)", "write"),
 }
 ASSIST_SCHEMA = {
     "type": "object",
@@ -430,6 +431,10 @@ def run_check(pid, tool):
         return f"문헌분석표에 논문이 3편 이상 있어야 해요(지금 {len(m)}편)"
     if tool == "intro" and not rep.get("gaps"):
         return "연구 공백 찾기를 먼저 해야 해요"
+    if tool == "write":
+        pl = db.q("SELECT plan FROM projects WHERE id=?", (pid,), one=True) or {}
+        if not pl.get("plan"):
+            return "① 연구계획을 먼저 세워야 장별로 쓸 수 있어요"
     return ""
 
 

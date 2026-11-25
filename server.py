@@ -806,6 +806,14 @@ def guide_set(pid: int, d: dict = Body(...)):
     return {"ok": True}
 
 
+@app.post("/api/projects/{pid}/draft")
+def draft(pid: int, d: dict = Body(...)):
+    """④ 집필: 이어 쓰기 / 메모를 문단으로 풀기"""
+    mode = "expand" if d.get("mode") == "expand" else "continue"
+    return {"job": Job("draft", lambda j: agent.draft_paragraph(pid, mode, d.get("text", ""), d.get("before", ""), d.get("heading", ""), j.say),
+                       llm.engine_for(pid), pid, "draft").id}
+
+
 @app.post("/api/projects/{pid}/assist_run")
 def assist_run(pid: int, d: dict = Body(...)):
     """도우미가 제안하고 사용자가 [실행]을 누른 일. 각 탭의 버튼과 같은 작업을 돌린다."""
@@ -820,6 +828,19 @@ def assist_run(pid: int, d: dict = Body(...)):
         if not ids:
             raise HTTPException(400, "원고에 인용된 논문 중 새로 정리할 PDF가 없어요. ③ 문헌분석에서 직접 골라 주세요")
         return matrix_build(pid, {"paper_ids": ids})
+    if tool == "write":  # 장 전체 집필: 끝나면 원고 끝에 덧붙임
+        pr = db.q("SELECT plan, route FROM projects WHERE id=?", (pid,), one=True)
+        route = json.loads(pr["plan"])["routes"][pr["route"] or 0]
+        secs = route.get("outline") or []
+
+        def fn(j):
+            agent.write(pid, secs, j.say, j.stop, j.emitted.append)
+            if j.emitted:
+                cur = db.q("SELECT content FROM projects WHERE id=?", (pid,), one=True)["content"] or ""
+                db.x("UPDATE projects SET content=?, updated=datetime('now','localtime') WHERE id=?", (cur + "".join(j.emitted), pid))
+                j.say(f"원고 끝에 {len(j.emitted)}개 장을 덧붙였어요")
+
+        return {"job": Job("write", fn, llm.engine_for(pid), pid, "write").id}
     if tool == "gaps":
         return matrix_gaps(pid)
     if tool == "intro":

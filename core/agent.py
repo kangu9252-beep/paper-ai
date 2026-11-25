@@ -290,6 +290,44 @@ def parse_claims(text):
     return claims
 
 
+def _render(text, srcs, log):
+    """AI가 쓴 '문장 [번호]' 글 → 문장마다 원문 근거를 찾아 붙인 보라색 초안 문단(html)과 AI 메모. 못 만들면 (None, '')."""
+    # 본문과 AI 메모 분리 ([메모] / --- / 참고: 로 시작하는 꼬리말)
+    m = re.search(r"(?m)^\s*(?:\[메모\]|-{3,}|참고\s*:|※)", text)
+    note = ""
+    if m:
+        note = re.sub(r"^\s*(?:\[메모\]|-{3,}|참고\s*:|※)\s*", "", text[m.start():]).strip()
+        note = re.sub(r"\[(\d+)\]", lambda x: srcs[int(x.group(1)) - 1]["cite"] if 0 < int(x.group(1)) <= len(srcs) else "", re.sub(r"\s+", " ", note))
+        note = re.sub(r"(\([^()]+\))(?:\s*\1)+", r"\1", note)  # 같은 인용이 겹쳐 붙은 것 정리
+        text = text[: m.start()]
+    claims = parse_claims(text)
+    if not claims:
+        return None, ""
+    strict = db.get_settings().get("strict_verify", True)
+    matches = match_quotes(claims, srcs)
+    checks = [True] * len(claims)
+    if strict:
+        log("  근거 검증 중…")
+        idxs = [i for i, (c, q, sim) in enumerate(matches) if c and q and sim >= SUPPORT_MIN]
+        for i, v in zip(idxs, verify_batch([(claims[i][0], matches[i][1]) for i in idxs])):
+            checks[i] = v
+    parts, ok, bad = [], 0, 0
+    for (sent, idx), (chunk, quote, sim), passed in zip(claims, matches, checks):
+        t = html.escape(sent)
+        if chunk and quote and passed and (sim >= SUPPORT_MIN or not strict):
+            parts.append(f"{t} {cite_span(chunk, quote)}.")
+            ok += 1
+        else:
+            parts.append(f"{t} {need_span(chunk['cite'] if chunk else '(출처 필요)')}.")
+            bad += 1
+    log(f"  → {ok}문장 근거 확인, {bad}문장 확인 필요(?)")
+    memo = f'<p class="ai-note" contenteditable="false">💬 AI 메모: {html.escape(note)} <small>(확인 후 지워주세요)</small></p>' if note else ""
+    if note:
+        log(f"  ※ AI 메모: {note[:120]}")
+    draft = html.escape(" ".join(s for s, _ in claims), quote=True)
+    return f'<p class="ai-draft" data-ai="{draft}">{" ".join(parts)}</p>', memo
+
+
 def write_section(topic, route, section, log, prev=""):
     query = f"{topic} {section} {route.get('name', '')}"
     srcs = pdfindex.search(query, k=6, per_paper=2)
@@ -317,40 +355,52 @@ def write_section(topic, route, section, log, prev=""):
         num_predict=900,
         temperature=0.3,
     )
-    # 본문과 AI 메모 분리 ([메모] / --- / 참고: 로 시작하는 꼬리말)
-    m = re.search(r"(?m)^\s*(?:\[메모\]|-{3,}|참고\s*:|※)", text)
-    note = ""
-    if m:
-        note = re.sub(r"^\s*(?:\[메모\]|-{3,}|참고\s*:|※)\s*", "", text[m.start():]).strip()
-        note = re.sub(r"\[(\d+)\]", lambda x: srcs[int(x.group(1)) - 1]["cite"] if 0 < int(x.group(1)) <= len(srcs) else "", re.sub(r"\s+", " ", note))
-        note = re.sub(r"(\([^()]+\))(?:\s*\1)+", r"\1", note)  # 같은 인용이 겹쳐 붙은 것 정리
-        text = text[: m.start()]
-    claims = parse_claims(text)
-    if not claims:
+    para, memo = _render(text, srcs, log)
+    if para is None:
         return f"<h2>{html.escape(section)}</h2><p>{need_span('(AI가 문장을 만들지 못했습니다 — 다시 시도해 주세요)')}</p>"
-    strict = db.get_settings().get("strict_verify", True)
-    matches = match_quotes(claims, srcs)
-    checks = [True] * len(claims)
-    if strict:
-        log("  근거 검증 중…")
-        idxs = [i for i, (c, q, sim) in enumerate(matches) if c and q and sim >= SUPPORT_MIN]
-        for i, v in zip(idxs, verify_batch([(claims[i][0], matches[i][1]) for i in idxs])):
-            checks[i] = v
-    parts, ok, bad = [], 0, 0
-    for (sent, idx), (chunk, quote, sim), passed in zip(claims, matches, checks):
-        t = html.escape(sent)
-        if chunk and quote and passed and (sim >= SUPPORT_MIN or not strict):
-            parts.append(f"{t} {cite_span(chunk, quote)}.")
-            ok += 1
-        else:
-            parts.append(f"{t} {need_span(chunk['cite'] if chunk else '(출처 필요)')}.")
-            bad += 1
-    log(f"  → {ok}문장 근거 확인, {bad}문장 확인 필요(?)")
-    memo = f'<p class="ai-note" contenteditable="false">💬 AI 메모: {html.escape(note)} <small>(확인 후 지워주세요)</small></p>' if note else ""
-    if note:
-        log(f"  ※ AI 메모: {note[:120]}")
-    draft = html.escape(" ".join(s for s, _ in claims), quote=True)
-    return f'<h2>{html.escape(section)}</h2><p class="ai-draft" data-ai="{draft}">{" ".join(parts)}</p>{memo}'
+    return f"<h2>{html.escape(section)}</h2>{para}{memo}"
+
+
+RULES = (
+    "규칙:\n"
+    "1. 한 줄에 한 문장씩 쓰고, 각 문장 끝에 근거가 된 자료 번호를 붙이세요. 예) 자기자비는 우울 증상과 부적 상관을 보였다 [2].\n"
+    "   문장은 '~이다', '~하였다', '~나타났다'로 끝내고 '~합니다'는 쓰지 마세요.\n"
+    "2. 자료에 없는 사실·수치·연도는 절대 지어내지 마세요.\n"
+    "3. 저자 이름이나 (저자, 연도) 표기는 쓰지 마세요. 번호만 붙이면 됩니다.\n"
+    "4. 자료가 부족해 쓰지 못한 내용이 있으면 맨 마지막 줄에 '[메모]'로 시작하는 한 줄로만 알려주세요. 그 밖의 설명은 쓰지 마세요."
+)
+
+
+def draft_paragraph(pid, mode, text, before, heading, log):
+    """④ 집필: 이어 쓰기(continue) — 커서 앞 내용에 이어질 문단 / 문단 풀기(expand) — 연구자의 메모를 근거 있는 문단으로."""
+    p = db.q("SELECT title, topic FROM projects WHERE id=?", (pid,), one=True) or {}
+    text, before = (text or "").strip(), (before or "").strip()
+    if mode == "expand":
+        if len(text) < 5:
+            raise RuntimeError("풀어 쓸 메모를 먼저 드래그해서 골라 주세요")
+        query = f"{heading} {text}"
+        task = (f"[연구자의 메모(개요)]\n{text}\n\n위 메모를 학술 논문 문체의 한국어 문단(4~7문장)으로 풀어 쓰세요. "
+                "메모의 흐름과 주장을 그대로 따르고, 메모에 없는 새 주장은 덧붙이지 마세요. 메모의 각 요점을 자료로 뒷받침하세요.")
+    else:
+        if len(before) < 30:
+            raise RuntimeError("이어 쓸 앞 내용이 없어요. 문단을 조금 쓴 뒤 그 끝에 커서를 두고 눌러 주세요")
+        query = f"{heading} {before[-500:]}"
+        task = (f"[지금까지 쓴 글(끝부분)]\n{before[-1500:]}\n\n위 글에 바로 이어질 다음 문단(3~6문장)을 쓰세요. "
+                "앞 문단의 흐름을 자연스럽게 잇고, 앞에서 한 말을 되풀이하지 마세요.")
+    log("관련 자료 찾는 중…")
+    srcs = pdfindex.search(query, k=6, per_paper=2)
+    if not srcs:
+        raise RuntimeError("내 자료에서 관련 근거를 찾지 못했어요. 자료를 먼저 더하거나 참조 폴더를 확인해 주세요")
+    block = "\n\n".join(f"[{i + 1}] {c['cite']}\n{c['text'][:600]}" for i, c in enumerate(srcs))
+    log("문단 쓰는 중…")
+    out = llm.chat(
+        f"논문 제목: {p.get('title')}\n지금 쓰는 장: {heading or '(모름)'}\n\n{task}\n\n[자료]\n{block}\n\n위 자료만 사용하세요.\n" + RULES,
+        system=SYS, num_ctx=6144, num_predict=900, temperature=0.3,
+    )
+    para, memo = _render(out, srcs, log)
+    if para is None:
+        raise RuntimeError("AI가 문단을 만들지 못했어요. 다시 시도해 주세요")
+    return {"html": para + memo}
 
 
 def write(project_id, sections, log, stop, emit):

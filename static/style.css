@@ -396,3 +396,10 @@ body.guest #approveNight, body.guest #fullNight, body.guest .owner-only, body.gu
 /* 도우미 실행 상자 */
 .run-box { margin-top: 8px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); }
 .cm.me.auto { opacity: .65; font-size: 12px; }
+
+/* AI 글쓰기 주의점 · 쓰는 중 표시 */
+.ai-caution { margin: 6px 16px 0; padding: 6px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); font-size: 12.5px; }
+.ai-caution summary { cursor: pointer; font-weight: 600; color: var(--warn); }
+.ai-caution ul { margin: 6px 0 2px; padding-left: 18px; line-height: 1.65; }
+.ai-draft-sample { background: rgba(140, 90, 220, .14); padding: 0 4px; border-radius: 4px; }
+.ai-wait { color: var(--muted); font-style: italic; background: var(--surface-2); border-radius: 8px; padding: 6px 10px; }

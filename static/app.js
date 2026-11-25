@@ -390,10 +390,10 @@ function runBox(r, i) {
   const [key, mult] = RUN_EST[r.tool] || [r.tool, 1];
   if (r.state === "cancel") return `<div class="run-box muted small">취소했어요.</div>`;
   if (r.state === "running") return `<div class="run-box small"><span class="spin"></span> <b>${esc(r.label)}</b> 실행 중… <span class="run-pg">${esc(r.pg || "")}</span></div>`;
-  if (r.state === "done") return `<div class="run-box small">✅ <b>${esc(r.label)}</b> 끝났어요. <button class="small ghost" data-tab="${r.tab}" data-anchor="${r.tab === "review" ? "#tool-" + r.tool : r.tool === "gaps" ? "#mxGap" : r.tool === "intro" ? "#mxIntro" : "#mxPick"}">결과 보러 가기 →</button></div>`;
+  if (r.state === "done") return `<div class="run-box small">✅ <b>${esc(r.label)}</b> 끝났어요. <button class="small ghost" data-tab="${r.tab}" data-anchor="${r.tab === "review" ? "#tool-" + r.tool : r.tool === "gaps" ? "#mxGap" : r.tool === "intro" ? "#mxIntro" : r.tool === "write" ? "#aiWrite" : "#mxPick"}">결과 보러 가기 →</button></div>`;
   if (r.state === "error") return `<div class="run-box small" style="color:var(--warn)">⚠ ${esc(r.err || "실행하지 못했어요")}</div>`;
   if (r.blocked) return `<div class="run-box small">🛠 <b>${esc(r.label)}</b> — 지금은 못 해요: ${esc(r.blocked)}</div>`;
-  return `<div class="run-box">🛠 <b>${esc(r.label)}</b>${r.why ? `<div class="small muted">${esc(r.why)}</div>` : ""}
+  return `<div class="run-box">🛠 <b>${esc(r.label)}</b>${r.why ? `<div class="small muted">${esc(r.why)}</div>` : ""}${r.tool === "write" ? `<div class="small" style="color:var(--warn);margin-top:4px">⚠ AI가 쓴 초안이 원고 끝에 덧붙어요. 그대로 내지 말고 근거를 확인하며 내 말로 고쳐 주세요. 실행 중에는 원고를 고치지 마세요.</div>` : ""}
     <div class="row" style="margin-top:6px;gap:6px">${pid ? costTag(pid, key, mult) : ""}<span class="grow"></span><button class="small ghost" data-run-no="${i}">취소</button><button class="small primary" data-run-go="${i}">실행</button></div></div>`;
 }
 async function chatRun(i) {
@@ -412,7 +412,7 @@ async function chatRun(i) {
     onDone: async (_, j) => {
       if (j.status !== "done") { r.state = "error"; r.err = (j.log || []).slice(-1)[0] || "멈췄어요"; renderChat(); return; }
       r.state = "done";
-      if (S.cur?.id === pid) { S.cur = await api(`/api/projects/${pid}`); S.est[pid] = null; }
+      if (S.cur?.id === pid) { S.cur = await api(`/api/projects/${pid}`); S.est[pid] = null; if (r.tool === "write" && S.tab === "write") renderWrite(); }
       renderChat();
       followUp(k, r.tool, `(실행 완료: ${r.label}) 결과를 쉽게 알려 줘`);
     },
@@ -1154,6 +1154,10 @@ function formDialog(title, fields, okText = "저장") {
   });
 }
 
+// 이 브라우저에만 기억하는 작은 설정 (막혀 있어도 앱은 정상 동작)
+function lsGet(k) { try { return localStorage.getItem("pa_" + k) || ""; } catch { return ""; } }
+function lsSet(k, v) { try { localStorage.setItem("pa_" + k, v); } catch {} }
+
 // ---------- ④ 집필 ----------
 let editor = null, margin = null, saveT = null, detectT = null, composing = false, openCite = null;
 const citeMsg = new WeakMap();
@@ -1163,14 +1167,24 @@ function renderWrite() {
   $("#tabBody").innerHTML = `
     <div class="toolbar">
       <button class="primary" id="aiWrite">✍ AI로 집필</button>
+      <button id="aiCont" title="커서 앞까지 쓴 글에 이어질 다음 문단을 근거를 붙여 써요">✍ 이어 쓰기</button>
+      <button id="aiExpand" title="드래그해서 고른 메모·개요를 근거 있는 문단으로 풀어 써요">📝 메모 → 문단</button>
       <button id="aiWriteNight" title="오늘 밤 로컬 AI로 무료 처리">🌙 새벽 집필 예약</button>
       <button id="autoAll">🤖 출처 필요(?) 모두 자동 찾기</button>
       <button id="refsBtn">📑 참고문헌 만들기</button>
       <button id="aiDraftBtn" class="aidraft-btn" style="display:none" title="AI가 쓴 문장을 아직 고치지 않은 문단 — 누르면 차례로 이동해요"></button>
       <span class="hint" id="saveState">(저자, 연도)로 쓰면 자동 인식 · 인용을 누르면 원문 위치</span>
     </div>
+    <details class="ai-caution" ${lsGet("cautionClosed") ? "" : "open"}><summary>⚠ AI 글쓰기 주의점</summary>
+      <ul>
+        <li><b>✍ AI로 집필</b>(장 전체): 연구계획 목차대로 쓴 <b>초안</b>이에요. 그대로 내면 AI가 쓴 글로 보일 수 있으니 내 말로 고쳐 쓰세요.</li>
+        <li><b>✍ 이어 쓰기</b>: 커서 앞까지의 흐름을 따라가요. 앞 내용이 틀리면 같이 틀리니, 앞 문단부터 확인하고 쓰세요. 커서가 있는 문단 바로 뒤에 들어가요.</li>
+        <li><b>📝 메모 → 문단</b>: 드래그한 메모의 주장만 살려 문장과 근거를 채워요. 메모에 없던 주장은 넣지 않지만 문장은 AI가 만든 거예요. 원래 메모는 지우지 않고 남겨 둬요.</li>
+        <li>공통: AI가 쓴 문단은 <span class="ai-draft-sample">보라색</span>으로 표시되고, 절반 넘게 고쳐 쓰면 사라져요. 인용을 눌러 원문이 정말 그 말을 하는지 꼭 확인하세요. <b>?</b>는 근거를 못 찾은 문장이에요. 사용 기록은 ⑤ 'AI 사용 명시'에 자동으로 남아요.</li>
+      </ul></details>
     <div class="desk"><div class="paper" id="editor" contenteditable="true" spellcheck="false"></div><div class="margin" id="margin"></div></div>`;
   editor = $("#editor");
+  $(".ai-caution").ontoggle = (e) => lsSet("cautionClosed", e.target.open ? "" : "1");
   margin = $("#margin");
   editor.innerHTML = p.content || "";
   if (reviewJob[p.id]) {
@@ -1194,6 +1208,9 @@ function renderWrite() {
     document.execCommand("insertText", false, e.clipboardData.getData("text/plain"));
   });
   $("#aiWrite").onclick = () => aiWriteDialog(false);
+  ["#aiCont", "#aiExpand"].forEach((id) => ($(id).onmousedown = (e) => e.preventDefault()));  // 누를 때 커서·선택이 풀리지 않게
+  $("#aiCont").onclick = () => aiDraft("continue");
+  $("#aiExpand").onclick = () => aiDraft("expand");
   $("#aiWriteNight").onclick = () => aiWriteDialog(true);
   $("#autoAll").onclick = autoAll;
   $("#refsBtn").onclick = makeRefs;
@@ -1501,6 +1518,51 @@ async function autoAll() {
   const money = e && e.sub ? " 내 Claude 구독으로 해요(추가 요금 없음)." : e && e.engine === "claude" ? ` Claude 사용 예상 약 ${(e.won.autoall || 0).toLocaleString()}원.` : " 내 컴퓨터 로컬 AI로 해요(무료).";
   if (!confirm(`출처 필요 ${list.length}곳을 차례로 자동으로 찾을까요?${money}`)) return;
   for (const c of list) if (document.body.contains(c) && c.classList.contains("need")) await autoFind(c);
+}
+
+// 이어 쓰기 / 메모를 문단으로: 커서(또는 선택) 위치의 문단 바로 뒤에 근거 있는 AI 초안을 넣음
+async function aiDraft(mode) {
+  const p = S.cur;
+  const sel = window.getSelection();
+  if (!sel.rangeCount || !editor.contains(sel.anchorNode)) return toast(mode === "expand" ? "풀어 쓸 메모를 원고에서 드래그해서 골라 주세요" : "이어 쓸 곳(문단 끝)에 커서를 먼저 두세요");
+  const range = sel.getRangeAt(0);
+  const text = mode === "expand" ? sel.toString().trim() : "";
+  if (mode === "expand" && text.length < 5) return toast("풀어 쓸 메모를 원고에서 드래그해서 골라 주세요");
+  const pre = document.createRange();
+  pre.setStart(editor, 0);
+  pre.setEnd(range.endContainer, range.endOffset);
+  const before = pre.toString().slice(-2000);
+  let node = range.endContainer.nodeType === 1 ? range.endContainer : range.endContainer.parentElement;
+  let block = node.closest("p,h1,h2,h3,h4,li,div");
+  if (!block || block === editor || !editor.contains(block)) block = null;
+  while (block && block.parentElement !== editor) block = block.parentElement;
+  let h = block, heading = "";
+  while (h) { if (/^H[1-4]$/.test(h.tagName)) { heading = h.textContent.trim(); break; } h = h.previousElementSibling; }
+  const wait = document.createElement("p");
+  wait.className = "ai-wait";
+  wait.contentEditable = "false";
+  wait.textContent = mode === "expand" ? "⏳ 메모를 문단으로 풀어 쓰는 중… (근거 확인까지 1~2분)" : "⏳ 다음 문단을 쓰는 중… (근거 확인까지 1~2분)";
+  if (block) block.after(wait); else editor.appendChild(wait);
+  const pid = p.id;
+  let job;
+  try { ({ job } = await api(`/api/projects/${pid}/draft`, { json: { mode, text, before, heading } })); }
+  catch (e) { wait.remove(); return toast("⚠ " + e.message, 6000); }
+  runJob(job, mode === "expand" ? "메모 → 문단" : "이어 쓰기", {
+    onDone: (r, j) => {
+      if (j.status !== "done" || !r?.html) { wait.remove(); toast("⚠ " + ((j.log || []).slice(-1)[0] || "쓰지 못했어요"), 7000); return; }
+      if (S.cur?.id !== pid || !document.body.contains(wait)) {
+        api(`/api/projects/${pid}`).then((pp) => api(`/api/projects/${pid}`, { method: "PUT", json: { content: (pp.content || "") + r.html } }));
+        return;
+      }
+      wait.insertAdjacentHTML("afterend", r.html);
+      wait.remove();
+      normalizeCites();
+      checkAiDrafts();
+      layoutMemos();
+      scheduleSave();
+      toast("보라색 문단이 AI가 쓴 부분이에요. 근거를 눌러 확인하고 내 말로 고쳐 주세요", 5000);
+    },
+  });
 }
 
 async function aiWriteDialog(night) {
