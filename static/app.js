@@ -1779,10 +1779,12 @@ function reportHtml(k, rep) {
 async function renderReview() {
   const p = S.cur;
   if (!S.est[p.id]) loadEst(p.id).then(() => { if (S.cur?.id === p.id && S.tab === "review") renderReview(); });
-  const body = $("#tabBody");
   const has = (p.content || "").replace(/<[^>]+>/g, "").trim().length > 30;
   let sched = { rows: [], next: "", task: "none" };
   if (!S.guest) try { sched = await api("/api/schedule"); } catch {}
+  // 기다리는 사이 화면이 바뀌었으면(다른 탭·다시 그리기) 그리지 않음 — 옛 화면에 그리면 버튼을 못 찾아 멈춤
+  const body = $("#tabBody");
+  if (!body || S.cur?.id !== p.id || S.tab !== "review") return;
   const mine = sched.rows.filter((r) => r.project_id === p.id && r.status !== "done").slice(0, 10);
   const rj = reviewJob[p.id];
   const card = ([k, t, d]) => `<div class="card" id="tool-${k}"><div class="row"><h3 class="grow">${t}</h3>

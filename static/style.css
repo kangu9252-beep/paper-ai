@@ -405,3 +405,6 @@ body.guest #approveNight, body.guest #fullNight, body.guest .owner-only, body.gu
 .ai-wait { color: var(--muted); font-style: italic; background: var(--surface-2); border-radius: 8px; padding: 6px 10px; }
 
 .card-dlg { max-width: 640px; } .card-dlg ul { margin: 4px 0 8px; padding-left: 18px; line-height: 1.6; }
+
+/* 내 자료 표 버튼 글자 줄바꿈 방지 */
+td.row button, td.row a { white-space: nowrap; }
