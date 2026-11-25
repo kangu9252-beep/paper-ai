@@ -388,5 +388,7 @@ body.guest #approveNight, body.guest #fullNight, body.guest .owner-only, body.gu
 .login-wrap { position: fixed; inset: 0; background: var(--bg); display: flex; align-items: center; justify-content: center; z-index: 200; padding: 16px; }
 .login { width: 100%; max-width: 380px; }
 .tbl { border-collapse: collapse; width: 100%; } .tbl th, .tbl td { text-align: left; padding: 4px 6px; border-bottom: 1px solid var(--line); }
-.fp-tip { background: #eef6ff; border: 1px solid #cfe3fb; border-radius: 8px; padding: 6px 10px; }
+.fp-tip { background: #eef6ff; border: 1px solid #cfe3fb; border-radius: 8px; padding: 6px 10px; color: #1f3550; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .fp-tip { background: #1d2a3a; border-color: #2f4a6a; color: #d6e6f8; } }
+:root[data-theme="dark"] .fp-tip { background: #1d2a3a; border-color: #2f4a6a; color: #d6e6f8; }
 .ref-miss { color: #b45309; font-size: 0.9em; }
