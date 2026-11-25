@@ -921,5 +921,5 @@ if __name__ == "__main__":
         sys.exit()
     night.start_scheduler()
     if not os.environ.get("NO_BROWSER") and "--night" not in sys.argv:
-        threading.Timer(1.5, lambda: webbrowser.open("http://127.0.0.1:8765")).start()
-    uvicorn.run(app, host="127.0.0.1", port=8765, log_level="warning")
+        threading.Timer(1.5, lambda: webbrowser.open(f"http://127.0.0.1:{os.environ.get('PORT', 8765)}")).start()
+    uvicorn.run(app, host="127.0.0.1", port=int(os.environ.get("PORT", 8765)), log_level="warning")
