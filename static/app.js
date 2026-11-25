@@ -363,13 +363,61 @@ function renderChat() {
   if (!w) return;
   const body = $("#chatBody", w);
   body.innerHTML = (msgs.length ? "" : `<div class="cm bot">안녕하세요! 논문 쓰다 막히는 것, 앱 사용법, 무엇이든 물어보세요.${S.cur ? `<br><span class="muted small">지금 '${esc(S.cur.title)}' 진행 상황을 알고 답해요.</span>` : ""}
-      <div class="chips">${["다음에 뭘 하면 돼요?", "예비심사 준비는 어떻게 해요?", "출처 확인은 어떻게 해요?", "매개효과 이론적 근거는 어디까지 써야 해요?"].map((q) => `<button class="small" data-q="${esc(q)}">${esc(q)}</button>`).join("")}</div></div>`)
-    + msgs.map((m) => `<div class="cm ${m.role === "user" ? "me" : "bot"}">${esc(m.content).replace(/\n/g, "<br>")}
-      ${(m.actions || []).length ? `<div class="chips">${m.actions.map((a) => `<button class="small primary" data-tab="${a.tab}" data-anchor="${esc(a.anchor)}">${esc(a.label)} →</button>`).join("")}</div>` : ""}</div>`).join("")
+      <div class="chips">${["다음에 뭘 하면 돼요?", "인용 점검 해 줘", "모의 심사 돌려 줘", "예비심사 준비는 어떻게 해요?"].map((q) => `<button class="small" data-q="${esc(q)}">${esc(q)}</button>`).join("")}</div></div>`)
+    + msgs.map((m, i) => `<div class="cm ${m.role === "user" ? (m.auto ? "me auto" : "me") : "bot"}">${esc(m.content).replace(/\n/g, "<br>")}
+      ${(m.actions || []).length ? `<div class="chips">${m.actions.map((a) => `<button class="small ${m.run ? "" : "primary"}" data-tab="${a.tab}" data-anchor="${esc(a.anchor)}">${esc(a.label)} →</button>`).join("")}</div>` : ""}
+      ${m.run ? runBox(m.run, i) : ""}</div>`).join("")
     + (S.chatBusy ? `<div class="cm bot"><span class="spin"></span> 생각하는 중…</div>` : "");
   body.scrollTop = body.scrollHeight;
   $$("[data-q]", body).forEach((b) => (b.onclick = () => sendChat(b.dataset.q)));
   $$("[data-anchor]", body).forEach((b) => (b.onclick = () => goTo(b.dataset.tab, b.dataset.anchor)));
+  $$("[data-run-go]", body).forEach((b) => (b.onclick = () => chatRun(+b.dataset.runGo)));
+  $$("[data-run-no]", body).forEach((b) => (b.onclick = () => { msgs[+b.dataset.runNo].run.state = "cancel"; renderChat(); }));
+}
+
+// 도우미가 제안한 일: 예상 금액을 보여 주고, 누르면 실행 → 끝나면 결과 요약
+const RUN_EST = { matrix: ["matrix_per_paper", 10] };
+function runBox(r, i) {
+  const pid = S.cur?.id;
+  const [key, mult] = RUN_EST[r.tool] || [r.tool, 1];
+  if (r.state === "cancel") return `<div class="run-box muted small">취소했어요.</div>`;
+  if (r.state === "running") return `<div class="run-box small"><span class="spin"></span> <b>${esc(r.label)}</b> 실행 중… <span class="run-pg">${esc(r.pg || "")}</span></div>`;
+  if (r.state === "done") return `<div class="run-box small">✅ <b>${esc(r.label)}</b> 끝났어요. <button class="small ghost" data-tab="${r.tab}" data-anchor="${r.tab === "review" ? "#tool-" + r.tool : r.tool === "gaps" ? "#mxGap" : r.tool === "intro" ? "#mxIntro" : "#mxPick"}">결과 보러 가기 →</button></div>`;
+  if (r.state === "error") return `<div class="run-box small" style="color:var(--warn)">⚠ ${esc(r.err || "실행하지 못했어요")}</div>`;
+  if (r.blocked) return `<div class="run-box small">🛠 <b>${esc(r.label)}</b> — 지금은 못 해요: ${esc(r.blocked)}</div>`;
+  return `<div class="run-box">🛠 <b>${esc(r.label)}</b>${r.why ? `<div class="small muted">${esc(r.why)}</div>` : ""}
+    <div class="row" style="margin-top:6px;gap:6px">${pid ? costTag(pid, key, mult) : ""}<span class="grow"></span><button class="small ghost" data-run-no="${i}">취소</button><button class="small primary" data-run-go="${i}">실행</button></div></div>`;
+}
+async function chatRun(i) {
+  const k = chatKey();
+  const m = S.chat[k][i];
+  const r = m.run;
+  const pid = S.cur?.id;
+  if (!pid || r.state) return;
+  r.state = "running";
+  renderChat();
+  let job;
+  try { ({ job } = await api(`/api/projects/${pid}/assist_run`, { json: { tool: r.tool } })); }
+  catch (e) { r.state = "error"; r.err = e.message; renderChat(); return; }
+  runJob(job, r.label + " (도우미)", {
+    onLog: (_, j) => { if (j.progress) { r.pg = `${j.progress.pct}%`; const el = $("#chatBody .run-pg"); if (el) el.textContent = r.pg; } },
+    onDone: async (_, j) => {
+      if (j.status !== "done") { r.state = "error"; r.err = (j.log || []).slice(-1)[0] || "멈췄어요"; renderChat(); return; }
+      r.state = "done";
+      if (S.cur?.id === pid) { S.cur = await api(`/api/projects/${pid}`); S.est[pid] = null; }
+      renderChat();
+      followUp(k, r.tool, `(실행 완료: ${r.label}) 결과를 쉽게 알려 줘`);
+    },
+  });
+}
+async function followUp(k, tool, text) {
+  (S.chat[k] = S.chat[k] || []).push({ role: "user", content: text, auto: true });
+  S.chatBusy = true;
+  renderChat();
+  try {
+    const { job } = await api("/api/assist", { json: { project_id: S.cur?.id || null, ran: tool, messages: S.chat[k].map(({ role, content }) => ({ role, content })) } });
+    runJob(job, "도우미", { onDone: (r, j) => { S.chatBusy = false; S.chat[k].push(j.status === "done" && r ? { role: "bot", content: r.answer, actions: r.actions, run: r.run } : { role: "bot", content: "결과를 요약하지 못했어요. 결과 화면에서 직접 확인해 주세요." }); renderChat(); } });
+  } catch (e) { S.chatBusy = false; renderChat(); }
 }
 async function sendChat(text) {
   text = (text || "").trim();
@@ -383,7 +431,8 @@ async function sendChat(text) {
     runJob(job, "도우미", {
       onDone: (r, j) => {
         S.chatBusy = false;
-        S.chat[k].push(j.status === "done" && r ? { role: "bot", content: r.answer, actions: r.actions } : { role: "bot", content: "답을 만들지 못했어요. " + ((j.log || []).slice(-1)[0] || "") });
+        S.chat[k].push(j.status === "done" && r ? { role: "bot", content: r.answer, actions: r.actions, run: r.run } : { role: "bot", content: "답을 만들지 못했어요. " + ((j.log || []).slice(-1)[0] || "") });
+        if (r?.run && S.cur && !S.est[S.cur.id]) loadEst(S.cur.id).then(renderChat);
         renderChat();
       },
     });

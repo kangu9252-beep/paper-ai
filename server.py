@@ -793,6 +793,27 @@ def guide_set(pid: int, d: dict = Body(...)):
     return {"ok": True}
 
 
+@app.post("/api/projects/{pid}/assist_run")
+def assist_run(pid: int, d: dict = Body(...)):
+    """도우미가 제안하고 사용자가 [실행]을 누른 일. 각 탭의 버튼과 같은 작업을 돌린다."""
+    tool = d.get("tool", "")
+    why = explore.run_check(pid, tool)
+    if why:
+        raise HTTPException(400, why)
+    if tool == "matrix":
+        pdfindex.set_scope(project_folders(pid))
+        ids = [c["id"] for c in matrix.candidates(pid) if c["suggested"] and not c["done"]][:10]
+        pdfindex.set_scope([])
+        if not ids:
+            raise HTTPException(400, "원고에 인용된 논문 중 새로 정리할 PDF가 없어요. ③ 문헌분석에서 직접 골라 주세요")
+        return matrix_build(pid, {"paper_ids": ids})
+    if tool == "gaps":
+        return matrix_gaps(pid)
+    if tool == "intro":
+        return matrix_intro(pid)
+    return run_review(pid, tool)
+
+
 @app.post("/api/assist")
 def assist(d: dict = Body(...)):
     pid = d.get("project_id")
@@ -801,7 +822,8 @@ def assist(d: dict = Body(...)):
     msgs = [m for m in d.get("messages", []) if isinstance(m, dict)][-12:]
     if not msgs:
         raise HTTPException(400, "질문을 적어주세요")
-    return {"job": Job("assist", lambda j: explore.assist(pid, msgs, j.say), llm.engine_for(pid), None, None).id}
+    ran = d.get("ran") if d.get("ran") in explore.RUN_TOOLS else None
+    return {"job": Job("assist", lambda j: explore.assist(pid, msgs, j.say, ran), llm.engine_for(pid), None, None).id}
 
 
 @app.post("/api/explain")

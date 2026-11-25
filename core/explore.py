@@ -389,14 +389,60 @@ APP_MAP = """[논문 AI 앱의 기능과 위치]
 ⑤ 원고 점검(review): 원고 불러오기(#impFile, hwpx·docx·txt), 심사위원 3인 모의 심사와 답변서 재심사(#tool-panel), 예비심사 리뷰(#tool-structure), 인용 전체 점검(#tool-cites), 근거 없는 문장(#tool-uncited), 논의 보강(#tool-discuss), 최신 연구(#tool-recent), 참고문헌 대조(#tool-refs), 문장 다듬기(#tool-style), AI 문체 점검(#tool-aitone), AI 사용 기록과 투고용 공개 문구(#aiUse). 상담 사례처럼 민감한 원고는 '로컬 AI만 사용'을 켤 것.
 설정(settings): AI 엔진(내 컴퓨터 로컬 AI / Claude), Claude 키 연결 도우미, 논문 폴더, 대학 도서관 로그인, 새벽 자동 실행.
 근거 문장 맞추기에는 컴퓨터의 Ollama가 켜져 있어야 함."""
+# 도우미가 직접 돌릴 수 있는 일 (원고를 바꾸거나 지우는 일은 없음 — 결과는 각 탭에 저장)
+RUN_TOOLS = {
+    "panel": ("심사위원 3인 모의 심사", "review"),
+    "structure": ("예비심사 리뷰(일목요연함)", "review"),
+    "cites": ("인용 전체 점검", "review"),
+    "uncited": ("근거 없는 문장 찾기", "review"),
+    "discuss": ("논의 보강", "review"),
+    "recent": ("최신 연구 찾기", "review"),
+    "refs": ("참고문헌 대조", "review"),
+    "style": ("문장 다듬기", "review"),
+    "aitone": ("AI 문체 점검", "review"),
+    "matrix": ("원고에 인용된 논문으로 문헌분석표 만들기(최대 10편)", "matrix"),
+    "gaps": ("연구 공백 찾기", "matrix"),
+    "intro": ("서론 초안 쓰기", "matrix"),
+}
 ASSIST_SCHEMA = {
     "type": "object",
     "properties": {
         "answer": {"type": "string"},
         "actions": {"type": "array", "items": {"type": "object", "properties": {"label": {"type": "string"}, "anchor": {"type": "string", "enum": list(ANCHORS)}}, "required": ["label", "anchor"]}},
+        "run": {"type": "array", "items": {"type": "object", "properties": {"tool": {"type": "string", "enum": list(RUN_TOOLS)}, "why": {"type": "string"}}, "required": ["tool", "why"]}},
     },
-    "required": ["answer", "actions"],
+    "required": ["answer", "actions", "run"],
 }
+
+
+def run_check(pid, tool):
+    """도우미가 고른 일을 지금 돌릴 수 있는지. 안 되면 이유(쉬운 말)."""
+    if tool not in RUN_TOOLS:
+        return "할 수 없는 일이에요"
+    if not pid:
+        return "논문 프로젝트를 먼저 열어 주세요"
+    p = db.q("SELECT content, matrix, reports FROM projects WHERE id=?", (pid,), one=True) or {}
+    m = json.loads(p.get("matrix") or "{}")
+    rep = json.loads(p.get("reports") or "{}")
+    if RUN_TOOLS[tool][1] == "review" and len(BeautifulSoup(p.get("content") or "", "html.parser").get_text().strip()) < 200:
+        return "원고가 아직 없어요. ⑤ 원고 점검에서 원고를 먼저 불러와 주세요"
+    if tool == "gaps" and len(m) < 3:
+        return f"문헌분석표에 논문이 3편 이상 있어야 해요(지금 {len(m)}편)"
+    if tool == "intro" and not rep.get("gaps"):
+        return "연구 공백 찾기를 먼저 해야 해요"
+    return ""
+
+
+def _ran_result(pid, tool):
+    """방금 돌린 일의 결과를 도우미가 요약할 수 있게 짧게."""
+    p = db.q("SELECT reports, matrix FROM projects WHERE id=?", (pid,), one=True) or {}
+    rep = json.loads(p.get("reports") or "{}")
+    if tool == "matrix":
+        m = json.loads(p.get("matrix") or "{}")
+        return f"문헌분석표 {len(m)}편: " + " / ".join(f"{(r.get('cite') or '')} {str(((r.get('fields') or {}).get('findings') or {}).get('v', ''))[:80]}" for r in list(m.values())[:10])
+    r = rep.get(tool) or {}
+    data = json.dumps(r.get("data", r), ensure_ascii=False)
+    return f"요약: {r.get('summary', '')}\n자세히: {data[:3500]}"
 PERSONA = {"start": "처음 시작(주제만 있음)", "draft": "초안이 있음(쓰는 중)", "revise": "심사·수정을 앞둠(거의 완성)"}
 
 
@@ -434,10 +480,18 @@ def _state(pid):
     return "\n".join(lines)
 
 
-def assist(pid, messages, log):
+def assist(pid, messages, log, ran=None):
     convo = "\n".join(f"{'연구자' if m.get('role') == 'user' else '도우미'}: {m.get('content', '')[:1500]}" for m in messages[-12:])
+    ran_txt = ""
+    if ran in RUN_TOOLS and pid:
+        ran_txt = f"\n\n[방금 도우미가 실행한 일: {RUN_TOOLS[ran][0]} — 결과]\n{_ran_result(pid, ran)}\n이 결과를 연구자에게 쉽게 요약하고(가장 중요한 것 3가지), 다음에 할 일을 제안하세요."
+    tools_txt = "\n".join(f"- {k}: {v[0]}" for k, v in RUN_TOOLS.items())
     r = llm.chat(
-        f"{APP_MAP}\n\n[지금 연구자의 진행 상황]\n{_state(pid)}\n\n[대화]\n{convo}\n\n"
+        f"{APP_MAP}\n\n[도우미가 직접 실행할 수 있는 일(run)]\n{tools_txt}\n\n[지금 연구자의 진행 상황]\n{_state(pid)}\n\n[대화]\n{convo}{ran_txt}\n\n"
+        "연구자가 '해 줘', '네가 해', '돌려 줘'처럼 실행을 원하면, 위 목록에서 알맞은 일 하나를 run에 넣고 why에 한 줄 이유를 쓰세요. "
+        "실행은 연구자가 화면의 [실행] 버튼을 눌러 확인한 뒤에만 시작되니, answer에는 '이걸 돌릴게요, 아래 버튼을 눌러 주세요'처럼 쓰세요. "
+        "실행을 원하지 않는 질문이면 run은 빈 배열. 원고 직접 수정·삭제·설정 변경·파일 올리기는 실행할 수 없으니 방법만 안내하세요. "
+        "연구 공백 찾기는 문헌분석표 3편 이상, 서론 초안은 연구 공백 찾기 뒤에만 가능해요. 조건이 안 되면 먼저 해야 할 일을 run에 넣으세요.\n"
         "마지막 연구자 말에 답하세요. answer는 쉬운 한국어로, 짧은 문단이나 번호 목록으로(길어도 10줄). 무엇을, 왜, 어떤 순서로 하면 되는지 구체적으로. "
         "앱 기능이 도움이 되면 actions에 바로가기 버튼을 1~3개 넣으세요(label은 버튼 글자, anchor는 위 기능 위치). "
         "논문 방법론 질문에는 일반적인 원칙으로 답하되, 학교·학과 규정과 지도교수 판단을 확인하라고 덧붙이세요. 모르는 것은 모른다고 하세요. "
@@ -451,4 +505,9 @@ def assist(pid, messages, log):
         temperature=0.3,
     )
     acts = [{"label": a["label"], "anchor": a["anchor"], "tab": ANCHORS[a["anchor"]][0]} for a in r.get("actions", []) if a.get("anchor") in ANCHORS][:3]
-    return {"answer": r.get("answer", ""), "actions": acts}
+    run = None
+    for x in r.get("run") or []:
+        if x.get("tool") in RUN_TOOLS:
+            run = {"tool": x["tool"], "label": RUN_TOOLS[x["tool"]][0], "tab": RUN_TOOLS[x["tool"]][1], "why": x.get("why", ""), "blocked": run_check(pid, x["tool"])}
+            break
+    return {"answer": r.get("answer", ""), "actions": acts, "run": run}

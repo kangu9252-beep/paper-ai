@@ -392,3 +392,7 @@ body.guest #approveNight, body.guest #fullNight, body.guest .owner-only, body.gu
 @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .fp-tip { background: #1d2a3a; border-color: #2f4a6a; color: #d6e6f8; } }
 :root[data-theme="dark"] .fp-tip { background: #1d2a3a; border-color: #2f4a6a; color: #d6e6f8; }
 .ref-miss { color: #b45309; font-size: 0.9em; }
+
+/* 도우미 실행 상자 */
+.run-box { margin-top: 8px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); }
+.cm.me.auto { opacity: .65; font-size: 12px; }
