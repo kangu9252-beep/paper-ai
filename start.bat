@@ -6,6 +6,22 @@ title PaperAI
 
 if exist ".venv\Scripts\python.exe" goto claude
 
+chcp 65001 >nul
+echo.
+echo  ============================================================
+echo   논문 AI를 처음 설치해요. 아래 프로그램이 함께 설치돼요.
+echo.
+echo    1. 파이썬 (Python 3.12) - 앱을 돌리는 프로그램. 이미 있으면 건너뛰어요
+echo    2. 앱에 필요한 파이썬 부품들 - 이 폴더 안(.venv)에만 설치돼요
+echo    3. Claude Code (Anthropic 공식) - 내 Claude 구독으로 앱을 쓰기 위해 필요해요
+echo.
+echo   모두 무료이고, 관리자 권한 없이 내 계정에만 설치돼요. (10분 안팎)
+echo  ============================================================
+echo.
+echo  설치하려면 아무 키나 누르세요. 그만두려면 이 창을 닫으세요.
+pause >nul
+chcp 949 >nul
+
 set "PY="
 where py >nul 2>nul && set "PY=py -3"
 if not defined PY where python >nul 2>nul && python -c "import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)" >nul 2>nul && set "PY=python"

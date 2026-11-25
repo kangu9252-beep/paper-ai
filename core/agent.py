@@ -401,13 +401,100 @@ def _pick(sentence, cands):
     return {"chunk_id": c["id"], "quote": q, "cite": c["cite"], "title": c["title"], "reason": r.get("reason", "")}
 
 
+# 같은 논문을 여러 번 인용했으면 한 번만 읽고 여러 문장의 근거를 한꺼번에 찾아 둔다 (find_in_paper_many)
+_prefetched = {}
+
+
+def _pkey(sentence, paper_ids):
+    return (sentence.strip(), tuple(paper_ids[:2]))
+
+
+def _paper_parts(pid, max_chars):
+    rows = db.q("SELECT c.id, c.page, c.text, p.title, p.authors, p.year FROM chunks c JOIN papers p ON p.id=c.paper_id WHERE c.paper_id=? ORDER BY c.page, c.id", (pid,))
+    parts, size = [], 0
+    for r in rows:
+        if size > max_chars:
+            break
+        parts.append(f"<c{r['id']}> (p.{r['page'] + 1}) {r['text']}")
+        size += len(r["text"])
+    return rows, parts
+
+
+def _hit(rows, cid, q, reason):
+    by = {r["id"]: r for r in rows}
+    c = by.get(cid)
+    if not c or not pdfindex.locate(c["text"], q):
+        c = next((r for r in rows if pdfindex.locate(r["text"], q)), None) if q else None
+    if not c:
+        return None
+    a = json.loads(c["authors"] or "[]")
+    return {"chunk_id": c["id"], "quote": q, "cite": pdfindex.cite_label(a, c["year"]), "title": c["title"], "reason": reason}
+
+
+def _distinct(paper_ids):
+    """같은 PDF가 여러 폴더에 있으면 한 편만 (제목·쪽수가 같으면 같은 논문)"""
+    out, seen = [], set()
+    for pid in paper_ids[:2]:
+        r = db.q("SELECT title, pages FROM papers WHERE id=?", (pid,), one=True) or {}
+        k = (re.sub(r"\W", "", (r.get("title") or "").lower())[:60], r.get("pages"))
+        if k in seen and k[0]:
+            continue
+        seen.add(k)
+        out.append(pid)
+    return out
+
+
+def find_in_paper_many(sentences, paper_ids, log=None, max_chars=150000):
+    """한 논문을 한 번만 읽고 여러 주장 문장의 근거를 한꺼번에 찾는다. 결과는 find_in_paper가 바로 꺼내 쓴다.
+    (같은 논문을 5번 인용했으면 예전엔 5번 읽었지만 이제 1번)"""
+    if llm.engine() != "claude" or not paper_ids or not sentences:
+        return
+    left = list(dict.fromkeys(s.strip() for s in sentences if s.strip()))
+    for pid in _distinct(paper_ids):
+        if not left:
+            break
+        rows, parts = _paper_parts(pid, max_chars)
+        if not rows:
+            continue
+        for s0 in range(0, len(left), 12):  # 한 번에 12문장까지
+            batch = left[s0 : s0 + 12]
+            claims = "\n".join(f"{i + 1}. {t}" for i, t in enumerate(batch))
+            try:
+                res = llm.light(
+                    f"[주장 문장들]\n{claims}\n\n[논문 원문 — 조각마다 <c번호>]\n" + "\n".join(parts) + "\n\n"
+                    "주장 문장마다, 위 논문에서 그 문장을 직접 뒷받침하는 부분을 찾으세요. n에 주장 번호, chunk에 조각 번호(숫자만), "
+                    "quote에 원문을 글자 그대로(번역하지 말고) 10~40단어 복사하세요. 뒷받침하는 부분이 없으면 chunk를 0으로 하세요. "
+                    "비슷한 주제일 뿐 내용이 다르면 0입니다.",
+                    system=SYS,
+                    schema={"type": "object", "properties": {"items": {"type": "array", "items": {"type": "object", "properties": {
+                        "n": {"type": "integer"}, "chunk": {"type": "integer"}, "quote": {"type": "string"}, "reason": {"type": "string"}},
+                        "required": ["n", "chunk", "quote", "reason"]}}}, "required": ["items"]},
+                )
+            except Exception:
+                continue
+            for it in res.get("items", []):
+                k = int(it.get("n") or 0) - 1
+                if 0 <= k < len(batch) and int(it.get("chunk") or 0):
+                    h = _hit(rows, int(it["chunk"]), it.get("quote", ""), it.get("reason", ""))
+                    if h:
+                        _prefetched[_pkey(batch[k], paper_ids)] = h
+        left = [t for t in left if _pkey(t, paper_ids) not in _prefetched]
+    for t in left:  # 끝까지 읽었지만 근거 없음 → 다시 읽지 않도록 '없음'도 기억
+        _prefetched[_pkey(t, paper_ids)] = None
+    if log:
+        log(f"   논문을 한 번 읽고 {len(sentences)}문장의 근거를 함께 찾음")
+
+
 def find_in_paper(sentence, paper_ids, max_chars=150000):
     """인용한 논문을 통째로 Claude(Haiku)에게 읽혀 근거 문장을 찾는다.
     검색 모델로 후보를 고르면 한국어 문장↔영어 논문에서 자주 놓쳐서 이 방법을 먼저 쓴다. 한 편에 2~5원 안팎.
     로컬 AI면 너무 느려서 None (기존 방식으로)."""
     if llm.engine() != "claude" or not paper_ids:
         return None
-    for pid in paper_ids[:2]:
+    key = _pkey(sentence, paper_ids)
+    if key in _prefetched:  # 미리 한꺼번에 찾아 둔 결과
+        return _prefetched.pop(key)
+    for pid in _distinct(paper_ids):
         rows = db.q("SELECT c.id, c.page, c.text, p.title, p.authors, p.year FROM chunks c JOIN papers p ON p.id=c.paper_id WHERE c.paper_id=? ORDER BY c.page, c.id", (pid,))
         if not rows:
             continue

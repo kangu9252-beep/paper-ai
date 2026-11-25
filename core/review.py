@@ -313,6 +313,25 @@ def check_citations(pid, log, stop=lambda: False, use_internet=True):
     cites = all_cites(soup)
     save(pid, soup)
     log(f"인용 {len(cites)}개 점검 시작")
+    # 같은 논문을 여러 번 인용했으면 그 논문은 한 번만 읽는다: 논문별로 문장을 모아 미리 근거를 찾아 둠
+    agent._prefetched.clear()
+    groups = {}
+    for c in cites:
+        if c.get("data-chunk") or c.get_text().strip() == "(출처 필요)":
+            continue
+        a, y = parse_label(c.get_text())
+        sent = cite_sentence(c)
+        ids = [x["id"] for x in pdfindex.find_papers_by_cite(a, y)] if a and sent else []
+        if ids:
+            groups.setdefault(tuple(ids[:2]), []).append(sent)
+    multi = {k: v for k, v in groups.items() if len(v) >= 2}
+    if multi:
+        log(f"여러 번 인용된 논문 {len(multi)}편은 한 번씩만 읽어요 (인용 {sum(len(v) for v in multi.values())}곳)")
+        for n, (ids, sents) in enumerate(multi.items(), 1):
+            if stop():
+                break
+            log(f"  미리 읽기 {n}/{len(multi)}")
+            agent.find_in_paper_many(sents, list(ids), log)
     items, ok, warn, need = [], 0, 0, 0
     for i, c in enumerate(cites):
         if stop():
