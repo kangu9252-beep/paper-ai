@@ -4,7 +4,7 @@ rem Command lines stay ASCII only (cmd misreads multibyte text inside blocks und
 cd /d "%~dp0"
 title PaperAI
 
-if exist ".venv\Scripts\python.exe" goto run
+if exist ".venv\Scripts\python.exe" goto claude
 
 set "PY="
 where py >nul 2>nul && set "PY=py -3"
@@ -37,6 +37,41 @@ if errorlevel 1 goto fail
 ".venv\Scripts\python.exe" -m pip install -q --upgrade pip
 ".venv\Scripts\python.exe" -m pip install -q -r requirements.txt
 if errorlevel 1 goto fail
+
+:claude
+rem Claude Code: lets the app use the user's own Claude subscription instead of a paid API key
+if exist "%USERPROFILE%\.local\bin\claude.exe" goto run
+if exist "%APPDATA%\npm\node_modules\@anthropic-ai\claude-code\bin\claude.exe" goto run
+if exist "%LOCALAPPDATA%\Microsoft\WinGet\Links\claude.exe" goto run
+where claude >nul 2>nul && goto run
+if exist ".venv\claude-skip" goto run
+chcp 65001 >nul
+echo.
+echo  Claude Code를 설치할게요. (내 Claude 구독으로 앱을 쓰기 위해 필요해요)
+echo.
+chcp 949 >nul
+powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://claude.ai/install.ps1 | iex"
+if exist "%USERPROFILE%\.local\bin\claude.exe" goto claude_login
+winget install --id Anthropic.ClaudeCode -e --accept-source-agreements --accept-package-agreements --silent
+if exist "%LOCALAPPDATA%\Microsoft\WinGet\Links\claude.exe" goto claude_login
+chcp 65001 >nul
+echo.
+echo  [!] Claude Code를 설치하지 못했어요. 앱은 API 키로도 쓸 수 있어요.
+echo      나중에 다시 시도하려면 .venv 폴더 안의 claude-skip 파일을 지우고 start.bat을 실행하세요.
+echo skip> ".venv\claude-skip"
+timeout /t 5 >nul
+goto run
+
+:claude_login
+chcp 65001 >nul
+echo.
+echo  설치 완료! 새로 뜨는 창에서 Claude 계정으로 로그인해 주세요.
+echo  (로그인 방식을 고르면 브라우저가 열려요. 로그인 후 '허용'. 끝나면 그 창은 닫아도 돼요)
+echo.
+set "CLAUDE_EXE=%USERPROFILE%\.local\bin\claude.exe"
+if not exist "%CLAUDE_EXE%" set "CLAUDE_EXE=%LOCALAPPDATA%\Microsoft\WinGet\Links\claude.exe"
+start "Claude Login" cmd /k ""%CLAUDE_EXE%""
+timeout /t 5 >nul
 
 :run
 chcp 65001 >nul

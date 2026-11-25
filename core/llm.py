@@ -314,8 +314,14 @@ def claude_cli():
     import os
     import shutil
 
-    exe = os.path.join(os.environ.get("APPDATA", ""), "npm", "node_modules", "@anthropic-ai", "claude-code", "bin", "claude.exe")
-    return exe if os.path.exists(exe) else shutil.which("claude")
+    for exe in (
+        os.path.join(os.path.expanduser("~"), ".local", "bin", "claude.exe"),  # 공식 설치 프로그램 (install.ps1)
+        os.path.join(os.environ.get("APPDATA", ""), "npm", "node_modules", "@anthropic-ai", "claude-code", "bin", "claude.exe"),  # npm
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), "Microsoft", "WinGet", "Links", "claude.exe"),  # winget
+    ):
+        if os.path.exists(exe):
+            return exe
+    return shutil.which("claude")
 
 
 def via_subscription():

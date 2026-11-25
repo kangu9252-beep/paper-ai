@@ -25,7 +25,7 @@ JOBS = {}
 
 
 # ---------- 검문: 웹 주소(터널)로 들어온 사람은 로그인 + 자기 자료만 ----------
-OWNER_ONLY = ("/api/fs", "/api/settings", "/api/scan", "/api/library", "/api/schedule", "/api/night", "/api/users")
+OWNER_ONLY = ("/api/fs", "/api/settings", "/api/scan", "/api/library", "/api/schedule", "/api/night", "/api/users", "/api/claude/login")
 OWN_PROJECT = re.compile(r"^/api/projects/(\d+)")
 OWN_PAPER = re.compile(r"^/api/(?:papers|paper|page|pdf)/(\d+)")
 
@@ -244,6 +244,7 @@ def status():
         "gdrive": GDRIVE if GDRIVE and GDRIVE not in s.get("scan_folders", []) else "",
         "jobs": [job_out(j) | {"log": j.log[-1:]} for j in JOBS.values() if j.status == "running" and j.uid == 0],
         "guest": False,
+        "cli": bool(llm.claude_cli()),  # 이 컴퓨터에 Claude Code가 깔려 있는지 (구독으로 쓰기)
     }
 
 
@@ -637,6 +638,18 @@ def users_delete(user_id: int):
     return {"ok": True}
 
 
+@app.post("/api/claude/login")
+def claude_login():
+    """Claude Code 로그인 창을 새로 띄운다 (구독으로 쓰려면 한 번 로그인 필요)."""
+    import subprocess
+
+    exe = llm.claude_cli()
+    if not exe:
+        raise HTTPException(400, "Claude Code가 설치되어 있지 않아요. start.bat을 다시 실행해 주세요.")
+    subprocess.Popen(["cmd", "/c", "start", "Claude 로그인", "cmd", "/k", exe], creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    return {"ok": True}
+
+
 @app.get("/api/claude/usage")
 def claude_usage():
     return llm.usage_this_month()
@@ -647,7 +660,7 @@ def claude_test():
     """저장된 키로 Claude에 짧게 물어보고, 구조화 출력까지 되는지 확인."""
     import time
 
-    if not llm.claude_key():
+    if not llm.claude_key() and not llm.via_subscription():
         return {"ok": False, "msg": "저장된 Claude API 키가 없어요. 키를 넣고 '저장'을 먼저 눌러주세요."}
     llm.set_engine("claude")
     t = time.time()

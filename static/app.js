@@ -167,9 +167,9 @@ async function refreshStatus() {
       el.textContent = `Claude 연결됨 · 내 자료 ${s.papers}편`;
     } else if (!s.models) {  // Ollama도 Claude도 없음: 처음 쓰는 사람
       el.className = "status bad";
-      el.textContent = "Claude 키를 넣어 주세요 (눌러서 연결)";
+      el.textContent = s.cli ? "Claude 연결이 필요해요 (눌러서 연결)" : "Claude 키를 넣어 주세요 (눌러서 연결)";
       el.style.cursor = "pointer";
-      el.onclick = () => claudeWizard(() => refreshStatus());
+      el.onclick = () => (s.cli ? subWizard() : claudeWizard(() => refreshStatus()));
     } else if (!s.models.includes(s.settings.model)) {
       el.className = "status bad";
       el.textContent = `모델 ${s.settings.model} 없음 — 설정 확인`;
@@ -2271,9 +2271,41 @@ async function boot() {
   await loadProjects();
   restoreJobs();
   if (S.guest && !st.me?.has_key) claudeWizard(() => refreshStatus());
-  // 처음 설치한 사람: 로컬 AI(Ollama)도 Claude도 없으면 연결 안내부터
-  if (!S.guest && !st.models && !(st.settings.engine === "claude" && (st.settings.claude_key || st.settings.claude_via === "subscription"))) claudeWizard(() => refreshStatus());
+  // 처음 설치한 사람: Claude Code가 있으면 구독으로, 없으면 API 키 안내
+  const ready = st.settings.engine === "claude" && (st.settings.claude_key || st.settings.claude_via === "subscription");
+  if (!S.guest && st.cli && !st.settings.claude_key && !ready) subWizard();
+  else if (!S.guest && !st.models && !ready) claudeWizard(() => refreshStatus());
   return S.projects.length ? openProject(S.projects[0].id) : showWelcome();
+}
+
+// ---------- 내 Claude 구독으로 쓰기 (Claude Code) ----------
+function subWizard() {
+  const d = document.createElement("dialog");
+  d.className = "wizard";
+  document.body.appendChild(d);
+  d.innerHTML = `<h3 style="margin:0 0 8px">Claude 구독으로 연결하기</h3>
+    <p>이 컴퓨터에 <b>Claude Code</b>가 설치되어 있어요. 쓰고 계신 <b>Claude 구독(Pro·Max)</b>으로 앱을 돌리면 <b>따로 요금이 나가지 않아요.</b> (구독 사용량 안에서)</p>
+    <ol class="small"><li>아래 <b>로그인 창 열기</b>를 누르면 까만 창이 떠요.</li><li>창에서 안내대로 로그인 방식을 고르면 브라우저가 열려요. Claude 계정으로 로그인하고 '허용'을 눌러요.</li><li>창에 입력 칸이 보이면 로그인 끝이에요. 그 창은 닫고 아래 <b>연결 확인</b>을 눌러요.</li></ol>
+    <p class="small muted" id="swMsg"></p>
+    <div class="row" style="justify-content:space-between;margin-top:10px"><button class="ghost" id="swApi">API 키로 쓸래요</button>
+      <span><button id="swLogin">로그인 창 열기</button> <button class="primary" id="swTest">연결 확인</button></span></div>`;
+  const msg = $("#swMsg", d);
+  $("#swApi", d).onclick = () => { d.close(); d.remove(); claudeWizard(() => refreshStatus()); };
+  $("#swLogin", d).onclick = async () => { await api("/api/claude/login", { method: "POST" }); msg.textContent = "로그인 창을 열었어요. 로그인을 마친 뒤 '연결 확인'을 눌러 주세요."; };
+  $("#swTest", d).onclick = async () => {
+    msg.innerHTML = `<span class="spin"></span> 확인하는 중… (10~20초)`;
+    await api("/api/settings", { json: { engine: "claude", claude_via: "subscription" } });
+    const r = await api("/api/claude/test", { method: "POST" });
+    if (r.ok) {
+      msg.innerHTML = `✅ <b>연결 완료!</b> 이제 Claude 구독으로 돌아가요.`;
+      $("#swTest", d).textContent = "완료";
+      $("#swTest", d).onclick = () => { d.close(); d.remove(); refreshStatus(); };
+    } else {
+      msg.style.color = "var(--warn)";
+      msg.textContent = /로그인/.test(r.msg) ? "아직 로그인이 안 됐어요. '로그인 창 열기'로 로그인을 마친 뒤 다시 눌러 주세요." : "연결에 실패했어요: " + r.msg;
+    }
+  };
+  d.showModal();
 }
 
 // ---------- 로그인 (웹 주소로 들어온 사람) ----------
