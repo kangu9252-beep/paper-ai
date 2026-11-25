@@ -87,16 +87,20 @@ AI를 숨기지 않고, 어디에 어떻게 썼는지 밝힐 수 있게 하는 �
 
 **필요한 것**
 - Windows 10/11
-- [Python 3.11 이상](https://www.python.org/downloads/) (설치할 때 "Add python.exe to PATH" 체크)
-- Claude API 키 ([Anthropic 콘솔](https://console.anthropic.com)에서 발급, 앱 안에 발급 안내가 있습니다)
+- Claude API 키 ([Anthropic 콘솔](https://console.anthropic.com)에서 발급, 앱이 처음 켜질 때 발급 방법을 단계별로 안내합니다)
+- 파이썬은 따로 설치하지 않아도 됩니다. 없으면 처음 실행할 때 자동으로 설치합니다.
 - (선택) [Ollama](https://ollama.com): 민감한 원고를 내 컴퓨터에서만 처리하고 싶을 때
 
-**실행**
-1. 이 저장소를 내려받습니다. (초록색 `Code` 버튼 → `Download ZIP` → 압축 풀기)
-2. 폴더 안의 `start.bat`을 더블클릭합니다. 처음에는 필요한 프로그램을 설치하느라 몇 분 걸립니다.
-3. 브라우저에서 `http://127.0.0.1:8765`가 열리면 첫 화면 안내를 따라가면 됩니다.
+**설치 (처음 한 번, 5~10분)**
+1. [최신 버전 내려받기](https://github.com/kangu9252-beep/paper-ai/releases/latest)에서 `Source code (zip)`를 받아 압축을 풉니다.
+   (또는 이 페이지 위쪽 초록색 `Code` 버튼 → `Download ZIP`)
+2. 압축을 푼 폴더 안의 **`start.bat`을 더블클릭**합니다.
+   - "Windows의 PC 보호" 창이 뜨면 `추가 정보` → `실행`을 누릅니다.
+   - 처음에는 필요한 프로그램을 설치하느라 5~10분 걸립니다.
+3. 브라우저에 앱이 열리면 **Claude 키 연결 안내**를 따라 키를 넣습니다.
 
-검은 창을 닫으면 앱이 꺼집니다.
+**다음부터는** `start.bat`만 더블클릭하면 바로 켜집니다. 검은 창을 닫으면 앱이 꺼집니다.
+원고와 PDF는 모두 그 폴더 안의 `data` 폴더에 저장되니, 이 폴더를 지우지 마세요. 새 버전으로 바꿀 때는 `data` 폴더만 옮기면 됩니다.
 
 ---
 

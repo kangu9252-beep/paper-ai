@@ -54,7 +54,7 @@ def _url():
 
 def models():
     try:
-        r = httpx.get(_url() + "/api/tags", timeout=5)
+        r = httpx.get(_url() + "/api/tags", timeout=1.5)  # Ollama가 없는 컴퓨터에서 첫 화면이 늦게 뜨지 않게
         return [m["name"] for m in r.json().get("models", [])]
     except Exception:
         return None

@@ -159,9 +159,17 @@ async function refreshStatus() {
       el.textContent = s.me?.has_key ? `${s.me.name}님 · 내 자료 ${s.papers}편` : `${s.me?.name || ""}님 · Claude 키를 넣어 주세요`;
       return;
     }
-    if (!s.models) {
+    const claudeReady = s.settings.engine === "claude" && (s.settings.claude_key || s.settings.claude_via === "subscription");
+    el.onclick = null;
+    el.style.cursor = "";
+    if (claudeReady) {
+      el.className = "status ok";
+      el.textContent = `Claude 연결됨 · 내 자료 ${s.papers}편`;
+    } else if (!s.models) {  // Ollama도 Claude도 없음: 처음 쓰는 사람
       el.className = "status bad";
-      el.textContent = "로컬 AI(Ollama)가 꺼져 있어요";
+      el.textContent = "Claude 키를 넣어 주세요 (눌러서 연결)";
+      el.style.cursor = "pointer";
+      el.onclick = () => claudeWizard(() => refreshStatus());
     } else if (!s.models.includes(s.settings.model)) {
       el.className = "status bad";
       el.textContent = `모델 ${s.settings.model} 없음 — 설정 확인`;
@@ -2263,6 +2271,8 @@ async function boot() {
   await loadProjects();
   restoreJobs();
   if (S.guest && !st.me?.has_key) claudeWizard(() => refreshStatus());
+  // 처음 설치한 사람: 로컬 AI(Ollama)도 Claude도 없으면 연결 안내부터
+  if (!S.guest && !st.models && !(st.settings.engine === "claude" && (st.settings.claude_key || st.settings.claude_via === "subscription"))) claudeWizard(() => refreshStatus());
   return S.projects.length ? openProject(S.projects[0].id) : showWelcome();
 }
 
