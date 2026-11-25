@@ -17,6 +17,7 @@ _ctx = threading.local()  # 작업(스레드)마다 쓸 엔진: "local" 또는 "
 
 def set_engine(name):
     _ctx.engine = name
+    _ctx.models = set()  # 이 작업에서 실제로 쓴 Claude 모델 (AI 사용 기록용)
 
 
 def engine():
@@ -238,7 +239,13 @@ def log_use(project_id, feature):
     if not project_id or not feature:
         return
     eng = engine()
-    model = CLAUDE_MODEL if eng == "claude" else db.get_settings()["model"]
+    if eng == "claude":  # 실제로 쓴 모델만 기록 (작업에 따라 Opus·Sonnet·Haiku를 나눠 씀)
+        used = sorted(getattr(_ctx, "models", set()))
+        if not used:
+            return  # Claude를 한 번도 부르지 않은 작업(예: 이미 점검한 원고 재사용)은 기록하지 않음
+        model = ", ".join(used)
+    else:
+        model = db.get_settings()["model"]
     db.x("INSERT INTO ai_log(project_id, feature, engine, model) VALUES(?, ?, ?, ?)", (project_id, feature, eng, model))
 
 
@@ -377,6 +384,7 @@ def _claude(prompt, system=None, schema=None, tier="standard"):
 
     from . import users
 
+    _ctx.models = getattr(_ctx, "models", set()) | {TIERS.get(tier, TIERS["standard"])[0]}
     if via_subscription():
         return _claude_cli(prompt, system, schema, TIERS.get(tier, TIERS["standard"])[0])
     key = claude_key()

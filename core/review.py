@@ -998,7 +998,19 @@ def ai_usage(pid):
     drafts = len(soup.select("p.ai-draft"))
     kinds = [k for k in PURPOSE if any(FEATURES.get(r["feature"], ("", ""))[1] == k for r in rows)]
     tools_ko, tools_en = [], []
-    for eng, model in sorted({(r["engine"], r["model"]) for r in rows if r["engine"]}):
+    def _pretty(ids):  # claude-sonnet-5-5 → Claude Sonnet 5.5
+        out = []
+        for m in (ids or "").split(","):
+            m = m.strip()
+            mm = re.match(r"claude-(opus|sonnet|haiku|fable)-(\d+)-(\d+)", m)
+            out.append(f"{mm.group(1).capitalize()} {mm.group(2)}.{mm.group(3)}" if mm else m)
+        return out
+
+    claude_models = sorted({x for r in rows if r["engine"] == "claude" for x in _pretty(r["model"])})
+    pairs = {(r["engine"], r["model"]) for r in rows if r["engine"] and r["engine"] != "claude"}
+    if claude_models:
+        pairs.add(("claude", ", ".join(claude_models)))
+    for eng, model in sorted(pairs):
         if eng == "claude":
             tools_ko.append(f"Anthropic Claude({model})")
             tools_en.append(f"Anthropic Claude ({model})")
