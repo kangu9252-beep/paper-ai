@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS projects (
   updated TEXT DEFAULT (datetime('now','localtime'))
 );
 CREATE TABLE IF NOT EXISTS settings (k TEXT PRIMARY KEY, v TEXT);
+CREATE TABLE IF NOT EXISTS paper_cards (paper_id INTEGER PRIMARY KEY, card TEXT, created TEXT DEFAULT (datetime('now','localtime')));
 CREATE TABLE IF NOT EXISTS usage (
   id INTEGER PRIMARY KEY, ts TEXT DEFAULT (datetime('now','localtime')),
   model TEXT, input INTEGER, output INTEGER

@@ -995,6 +995,7 @@ FEATURES = {
     "panel_respond": ("모의 심사 재심사", "struct"),
     "style": ("문장 다듬기(교정)", "polish"),
     "aitone": ("AI 문체 점검·문장 수정안", "polish"),
+    "polish_both": ("문장 다듬기·AI 문체 점검(한 번에)", "polish"),
     "journals": ("투고 학술지 추천", "lit"),
     "ask": ("내 자료에 묻기", "lit"),
 }
@@ -1429,6 +1430,213 @@ TOOLS["aitone"] = ai_tone
 
 
 
+# ---------- ① 무료 규칙 점검: AI 없이 규칙만으로 (토큰 0) ----------
+KO_ORDER = "가나다라마바사아자차카타파하"
+
+
+def _ko_key(t):
+    return re.sub(r"[^가-힣A-Za-z0-9]", "", t).lower()
+
+
+def lint_check(pid, log, stop=lambda: False):
+    p, soup = load(pid)
+    items = []
+
+    def add(kind, msg, snip="", para=""):
+        items.append({"kind": kind, "msg": msg, "snip": snip[:120], "para": para})
+
+    blocks = [(k, el, t) for _, ps in _para_blocks(soup) for k, el, t in ps]
+    body = [(k, t) for k, el, t in blocks]
+    # 참고문헌 목록을 제목별로 나눔 (목록이 두 번 들어간 경우를 잡기 위해)
+    lists, on = [], False
+    for el in soup.find_all(["h1", "h2", "h3", "p", "li"]):
+        if el.name in ("h1", "h2", "h3"):
+            on = bool(REF_HEAD.search(el.get_text()))
+            if on:
+                lists.append([])
+            continue
+        if on and el.find(["p", "li"]) is None:
+            t = el.get_text(" ", strip=True)
+            if len(t) > 10:
+                lists[-1].append(t)
+    lists = [x for x in lists if x]
+    log("참고문헌 형식 보는 중…")
+    if len(lists) > 1:
+        add("참고문헌 목록 중복", f"'참고문헌' 목록이 {len(lists)}곳에 있어요(각 {', '.join(str(len(x)) + '개' for x in lists)}). "
+            "'참고문헌 만들기'로 새로 만든 목록과 원래 목록이 함께 있는 것 같아요. 하나만 남기세요. (아래 점검은 마지막 목록 기준)")
+    refs = lists[-1] if lists else []
+    # 1) 참고문헌 순서: 국내(가나다) → 국외(ABC)
+    seen_en = False
+    for i in range(len(refs) - 1):
+        a, b = refs[i], refs[i + 1]
+        ka, kb = bool(re.match(r"\s*[가-힣]", a)), bool(re.match(r"\s*[가-힣]", b))
+        if not ka:
+            seen_en = True
+        if seen_en and kb:
+            add("참고문헌 순서", "국외 문헌 뒤에 국내 문헌이 있어요. 국내(가나다) → 국외(ABC) 순서로 두세요.", b)
+            break
+    for i in range(len(refs) - 1):
+        a, b = refs[i], refs[i + 1]
+        if bool(re.match(r"\s*[가-힣]", a)) == bool(re.match(r"\s*[가-힣]", b)) and _ko_key(a)[:6] > _ko_key(b)[:6]:
+            add("참고문헌 순서", "가나다·ABC 순서가 맞지 않아요.", f"{a[:40]} … 다음에 {b[:40]}")
+    # 2) 연도·쪽수 빠짐, 같은 저자·같은 해 a/b
+    ay = {}
+    for r in refs:
+        a, y = parse_ref(r)
+        if not y:
+            add("참고문헌 빠진 정보", "출판 연도가 보이지 않아요.", r)
+            continue
+        if re.search(r"\d+\s*\(\s*\d+\s*\)", r) and not re.search(r"\d+\s*[-–~]\s*\d+", r):
+            add("참고문헌 빠진 정보", "학술지 권(호)는 있는데 쪽수가 없어요.", r)
+        if a:  # APA: 저자 구성이 완전히 같고 같은 해일 때만 a/b
+            m = re.search(r"\(\s*" + y[:4], r) or re.search(r"[,.]\s*" + y[:4], r)
+            who = re.sub(r"[\s.,&]|and|외|등", "", r[: m.start()] if m else a).lower()
+            ay.setdefault((who, y[:4]), []).append(r)
+    for (who, y), rs in ay.items():
+        if len(rs) > 1 and not all(re.search(y + r"[a-z]", x) for x in rs):
+            add("같은 저자·같은 해", f"저자가 같은 {y}년 문헌이 {len(rs)}개예요. {y}a, {y}b처럼 구분해야 해요.", " / ".join(x[:40] for x in rs))
+    log("본문 표기 보는 중…")
+    text = "\n".join(t for _, t in body)
+    # 3) et al. 표기, '외'와 '등' 섞어 쓰기
+    for k, t in body:
+        for m in re.finditer(r"et al(?!\.)", t):
+            add("인용 표기", "'et al' 뒤에 마침표가 빠졌어요 → 'et al.'", t[max(0, m.start() - 20) : m.end() + 10], k)
+    n_oe, n_deung = len(re.findall(r"[가-힣]{2,4}\s*외\s*,\s*(?:19|20)\d{2}", text)), len(re.findall(r"[가-힣]{2,4}\s*등\s*,\s*(?:19|20)\d{2}", text))
+    if n_oe and n_deung:
+        add("인용 표기", f"국내 공저 표기에 '외'({n_oe}곳)와 '등'({n_deung}곳)을 섞어 썼어요. 한 가지로 통일하세요.")
+    # 4) 표·그림 번호
+    for kind in ("표", "그림"):
+        caps = [int(m.group(1)) for k, t in body for m in re.finditer(r"^\s*<?\s*" + kind + r"\s*(\d+)\s*>?", t)]
+        if caps and caps != sorted(caps):
+            add(f"{kind} 번호", f"{kind} 번호가 순서대로가 아니에요: {', '.join(map(str, caps))}")
+        if caps:
+            for n in range(1, max(caps) + 1):
+                if n not in caps:
+                    add(f"{kind} 번호", f"<{kind} {n}>이 빠져 있어요 (번호가 건너뜀).")
+            mentioned = {int(m.group(1)) for m in re.finditer(r"<?\s*" + kind + r"\s*(\d+)\s*>?\s*(?:에|과|와|을|를|은|는|의|에서|참고|참조)", text)}
+            for n in sorted(set(caps) - mentioned):
+                add(f"{kind} 번호", f"<{kind} {n}>을 본문에서 언급하지 않았어요. ('<{kind} {n}>에 제시하였다'처럼)")
+    # 5) 약어: 처음 나올 때 풀어 썼는지
+    defined = {}
+    for m in re.finditer(r"([가-힣A-Za-z][^()]{1,40}?)\s*\(\s*([A-Z][A-Za-z\-]{1,7})\s*[;,)]", text):
+        defined.setdefault(m.group(2), m.start())
+    for m in re.finditer(r"(?<![A-Za-z])([A-Z]{2,7})\s*\(\s*[A-Za-z가-힣][^()]{4,}\)", text):  # SLIM(Serious Leisure ...)처럼 약어 뒤에 풀이
+        defined.setdefault(m.group(1), m.start())
+    for m in re.finditer(r"이하\s*[‘'\"]?(?:[A-Z]-)?([A-Z]{2,7})", text):  # (이하 K-AAM)
+        defined.setdefault(m.group(1), m.start())
+    for k2, v2 in list(defined.items()):  # K-FS로 풀어 썼으면 FS도 풀어 쓴 것
+        if re.match(r"[A-Z]-", k2):
+            defined.setdefault(k2[2:], v2)
+    for m in re.finditer(r"(?<![A-Za-z])([A-Z]{2,6})(?![A-Za-z])", text):
+        ab = m.group(1)
+        if ab in ("APA", "DOI", "PDF", "AI", "SNS", "COVID", "IRB", "SPSS", "AMOS", "OECD", "WHO") or ab in defined and defined[ab] <= m.start():
+            continue
+        line = text[text.rfind("\n", 0, m.start()) + 1 : (text.find("\n", m.end()) + 1 or len(text) + 1) - 1]
+        if len(line) < 70:  # 표 칸·척도 목록처럼 짧은 줄은 건너뜀
+            continue
+        add("약어", f"'{ab}'를 처음 쓰는 곳에서 풀어 쓰지 않았어요. 예) 진지한 여가(SL)", text[max(0, m.start() - 25) : m.end() + 10])
+        defined[ab] = -1  # 한 번만 알림
+    log("문장 보는 중…")
+    # 6) 너무 긴 문장, '것이다' 남발, 한 문장 안 같은 낱말 반복
+    long_ = []
+    for k, t in body:
+        for s in _sents(t):
+            if len(re.sub(r"\([^)]*\)", "", s)) > 180:
+                long_.append((len(s), k, s))
+        if len(re.findall(r"것이다", t)) >= 3:
+            add("표현 반복", f"한 문단에 '~것이다'가 {len(re.findall(r'것이다', t))}번 나와요. 일부는 '~이다'로 줄여 보세요.", t[:80], k)
+        for s in _sents(t):
+            words = [w for w in re.findall(r"[가-힣]{2,}", s) if len(w) >= 3]
+            rep = sorted({w for w in words if words.count(w) >= 3})
+            if rep:
+                add("표현 반복", f"한 문장에 '{rep[0]}'이(가) 3번 이상 나와요.", s, k)
+    for n, k, s in sorted(long_, reverse=True)[:8]:
+        add("긴 문장", f"{n}자 문장이에요. 두 문장으로 나누면 읽기 쉬워요.", s, k)
+    # 7) 연구문제 핵심어가 결론에도 나오는지
+    rqs = [re.split(r"(?<=[?？])|(?<=다\.)|(?<=가\.)", m.group(1))[0] for m in re.finditer(r"연구\s*문제\s*\d+\s*[.:)]\s*([^\n]{8,200})", text)]
+    rq_stop = {"이때", "또한", "함께", "확인", "위해", "대한", "통해", "어떠한", "어떤", "무엇", "어떻게", "있는가", "미치는", "영향", "관계", "차이", "연구", "참여"}
+    concl = ""
+    on = False
+    for el in soup.find_all(["h1", "h2", "h3", "p", "li"]):
+        if el.name in ("h1", "h2", "h3"):
+            on = bool(re.search(r"결론|논의|제언", el.get_text()))
+            continue
+        if on:
+            concl += el.get_text(" ") + " "
+    if rqs and concl:
+        for q in rqs[:5]:
+            keys = [w for w in pdfindex.tokens(q) if len(w) >= 2 and w not in rq_stop][:5]
+            miss = [w for w in keys if w not in concl.lower()]
+            if keys and len(miss) >= max(2, len(keys) // 2 + 1):
+                add("연구문제 ↔ 결론", f"연구문제의 핵심어({', '.join(miss)})가 결론·논의에 거의 나오지 않아요. 결론이 이 연구문제에 답하는지 확인하세요.", q)
+    cnt = {}
+    for it in items:
+        cnt[it["kind"]] = cnt.get(it["kind"], 0) + 1
+    save_report(pid, "lint", items, "무료 규칙 점검: " + (" · ".join(f"{k} {v}" for k, v in cnt.items()) or "규칙상 걸리는 곳이 없어요") + " (AI 사용 안 함, 0원)", log)
+
+
+TOOLS["lint"] = lint_check
+
+
+# ---------- ③ 문장 다듬기 + AI 문체 점검을 한 번에 (원고를 한 번만 보내 토큰 절약) ----------
+POLISH_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "style": STYLE_SCHEMA["properties"]["items"],
+        "tone": AITONE_SCHEMA["properties"]["items"],
+    },
+    "required": ["style", "tone"],
+}
+
+
+def polish(pid, log, stop=lambda: False):
+    p, soup = load(pid)
+    blocks = [(k, el, t) for _, ps in _para_blocks(soup) for k, el, t in ps]
+    secs = _para_blocks(soup)
+    style_ids = {k for title, ps in secs if not (title and SKIP_HEAD.search(title) and REF_HEAD.search(title)) for k, _, _ in ps}
+    sc, tc = _cache_get(pid, "style_cache"), _cache_get(pid, "aitone_cache")
+    todo = [(k, el, t) for k, el, t in blocks if para_hash(t) not in tc or (k in style_ids and para_hash(t) not in sc)]
+    plan = bool(re.search(r"계획|프로포절|proposal", (p.get("title") or "") + (p.get("topic") or "")))
+    if len(todo) < len(blocks):
+        log(f"고친 문단 {len(todo)}개만 점검해요 (나머지는 지난 결과 그대로)")
+    step = 10
+    for i in range(0, len(todo), step):
+        if stop():
+            return
+        part = todo[i : i + step]
+        log(f"[{i // step + 1}/{(len(todo) + step - 1) // step}] 문장·AI 문체 함께 점검 중…")
+        r = llm.chat(
+            "\n\n".join(f"{k}: {t[:1600]}" for k, _, t in part) + "\n\n"
+            "두 가지를 한 번에 점검하세요.\n"
+            "[style] 교정자처럼 분명한 문장 문제만(문단당 0~3개). 분류: " + ", ".join(STYLE_CATS) + ". "
+            + ("이 원고는 연구계획서라 아직 하지 않은 일은 '~할 것이다'로 써야 합니다. " if plan else "")
+            + "각 항목: id(P번호), excerpt(원문 그대로 10~40자), category, problem(한 문장), fix(고친 예시).\n"
+            "[tone] AI가 쓴 글처럼 보이는 문장. 기준: " + ", ".join(AI_PATTERNS) + ". score 40 이상만. 각 항목: id, sentence(원문 그대로), score(0~100), "
+            "patterns, reason(한 문장), rewrite(뜻·사실·(저자, 연도)는 그대로, 연구자가 쓴 듯 자연스럽게. 없는 사실 추가 금지).",
+            system="당신은 한국어 학술 논문 전문 교정자입니다. 원고의 내용은 바꾸지 않고 문장만 다듬습니다.",
+            schema=POLISH_SCHEMA, num_ctx=8192, num_predict=3600, temperature=0.3,
+        )
+        ids = {k for k, _, _ in part}
+        st = [x | {"id": (x.get("id") or "").strip().upper()} for x in r.get("style", [])]
+        to = [x | {"id": (x.get("id") or "").strip().upper()} for x in r.get("tone", [])]
+        for k, _, t in part:
+            if k in style_ids:
+                sc[para_hash(t)] = [{"excerpt": x.get("excerpt", ""), "category": x.get("category", ""), "problem": x.get("problem", ""), "fix": x.get("fix", "")}
+                                    for x in st if x["id"] == k and x.get("problem")]
+            tc[para_hash(t)] = [{"sentence": x["sentence"], "score": max(0, min(100, int(x.get("score") or 0))),
+                                 "label": "AI" if int(x.get("score") or 0) >= 70 else "의심", "patterns": x.get("patterns", []),
+                                 "reason": x.get("reason", ""), "rewrite": x.get("rewrite", "")}
+                                for x in to if x["id"] == k and x.get("sentence") and int(x.get("score") or 0) >= 40]
+        _cache_put(pid, "style_cache", sc)
+        _cache_put(pid, "aitone_cache", tc)
+    log("결과 정리 중… (두 점검 모두 저장해 둔 결과로 채워서 AI를 다시 부르지 않아요)")
+    style_check(pid, log, stop)  # 모든 문단이 저장돼 있어 AI 호출 없음
+    ai_tone(pid, log, stop)
+
+
+TOOLS["polish"] = polish
+
+
 # ---------- 실행 전 예상 금액 ----------
 def estimates(pid):
     p = db.q("SELECT content, matrix FROM projects WHERE id=?", (pid,), one=True)
@@ -1447,6 +1655,8 @@ def estimates(pid):
         "panel": E("deep", int(T * 3.3), 9000),
         "style": E("standard", int(T * 1.2), max(1, paras // 12) * 1500),
         "aitone": E("standard", int(T * 1.2), max(1, paras // 10) * 2000),
+        "polish": E("standard", int(T * 1.25), max(1, paras // 10) * 3200),  # 원고를 한 번만 보냄
+        "lint": 0,
         "cites": E("standard", n_cites * 5000, n_cites * 500),
         "uncited": E("standard", int(T * 1.1), 2500),
         "discuss": E("standard", 20000, 5000),

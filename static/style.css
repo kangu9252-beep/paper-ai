@@ -403,3 +403,5 @@ body.guest #approveNight, body.guest #fullNight, body.guest .owner-only, body.gu
 .ai-caution ul { margin: 6px 0 2px; padding-left: 18px; line-height: 1.65; }
 .ai-draft-sample { background: rgba(140, 90, 220, .14); padding: 0 4px; border-radius: 4px; }
 .ai-wait { color: var(--muted); font-style: italic; background: var(--surface-2); border-radius: 8px; padding: 6px 10px; }
+
+.card-dlg { max-width: 640px; } .card-dlg ul { margin: 4px 0 8px; padding-left: 18px; line-height: 1.6; }

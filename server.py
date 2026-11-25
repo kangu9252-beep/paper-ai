@@ -401,6 +401,16 @@ def del_paper(pid: int):
     return {"ok": True}
 
 
+@app.get("/api/papers/{pid}/card")
+def paper_card(pid: int):
+    return {"card": agent.get_card(pid)}
+
+
+@app.post("/api/papers/{pid}/card")
+def paper_card_make(pid: int):
+    return {"job": Job("card", lambda j: agent.build_card(pid, j.say), llm.engine_for(None) if not users.is_guest() else "claude", None, None).id}
+
+
 @app.post("/api/papers/upload")
 async def upload(files: list[UploadFile] = File(...)):
     saved = []
@@ -712,7 +722,7 @@ def run_review(pid: int, tool: str, target: str = "", force: int = 0):
         msg = "원고가 지난번 점검 때와 같아서 다시 돌리지 않았어요 (0원). 새로 하려면 '새로 실행'을 누르세요."
         return {"job": Job("review", lambda j: j.say(msg), "local").id, "cached": True}
     fn = review.full_review if tool == "full" else review.TOOLS[tool]
-    feature = None if tool == "refs" else tool  # 참고문헌 대조는 AI를 쓰지 않음
+    feature = None if tool in ("refs", "lint") else "polish_both" if tool == "polish" else tool  # 참고문헌 대조·규칙 점검은 AI를 쓰지 않음
     return {"job": Job("review", lambda j: fn(pid, j.say, j.stop), llm.engine_for(pid), pid, feature).id}
 
 

@@ -494,34 +494,133 @@ def _distinct(paper_ids):
     return out
 
 
+# ---------- 논문 요약 카드 ----------
+CARD_PROPS = {
+    "purpose": {"type": "string"}, "sample": {"type": "string"}, "method": {"type": "string"},
+    "findings": {"type": "array", "items": {"type": "string"}},
+    "keypoints": {"type": "array", "items": {"type": "object", "properties": {"claim": {"type": "string"}, "chunk": {"type": "integer"}, "quote": {"type": "string"}}, "required": ["claim", "chunk", "quote"]}},
+}
+CARD_ASK = ("[요약 카드] 이 논문의 purpose(연구 목적 한 문장), sample(대상·표본), method(방법), findings(주요 결과 3~5개, 수치 포함), "
+            "keypoints(다른 논문이 인용할 만한 핵심 주장 8~14개: claim은 한국어 한 문장, chunk는 조각 번호, quote는 원문 그대로 10~40단어)를 채우세요. "
+            "keypoints는 이 논문이 직접 얻은 연구 결과(결과·논의 장)를 먼저 모두 넣고, 그다음 서론의 핵심 주장을 넣으세요. "
+            "claim 앞에 [결과] 또는 [선행연구]를 붙이세요.")
+
+
+def get_card(paper_id):
+    r = db.q("SELECT card FROM paper_cards WHERE paper_id=?", (paper_id,), one=True)
+    return json.loads(r["card"]) if r else None
+
+
+def _save_card(paper_id, rows, c):
+    if not c or not c.get("purpose"):
+        return None
+    kps = []
+    for k in c.get("keypoints") or []:
+        h = _hit(rows, int(k.get("chunk") or 0), k.get("quote", ""), "")
+        if h:  # 원문에서 확인된 문장만 카드에 남김
+            kps.append({"claim": k.get("claim", ""), "chunk_id": h["chunk_id"], "quote": h["quote"],
+                        "page": next((r["page"] + 1 for r in rows if r["id"] == h["chunk_id"]), None)})
+    card = {"purpose": c.get("purpose", ""), "sample": c.get("sample", ""), "method": c.get("method", ""),
+            "findings": c.get("findings") or [], "keypoints": kps}
+    db.x("INSERT OR REPLACE INTO paper_cards(paper_id, card) VALUES(?, ?)", (paper_id, json.dumps(card, ensure_ascii=False)))
+    return card
+
+
+def build_card(paper_id, log=print, max_chars=150000):
+    """논문을 한 번 읽어 요약 카드를 만든다 (Haiku). 내 자료에서 바로 보고, 근거 찾기 때 먼저 써서 토큰을 아낌."""
+    rows, parts = _paper_parts(paper_id, max_chars)
+    if not rows:
+        raise RuntimeError("이 PDF에서 읽을 글자가 없어요")
+    log("논문을 읽고 요약 카드를 만드는 중…")
+    res = llm.light("[논문 원문 — 조각마다 <c번호>]\n" + "\n".join(parts) + "\n\n" + CARD_ASK,
+                    system=SYS, schema={"type": "object", "properties": CARD_PROPS, "required": list(CARD_PROPS)})
+    card = _save_card(paper_id, rows, res)
+    if not card:
+        raise RuntimeError("요약 카드를 만들지 못했어요. 다시 시도해 주세요")
+    log(f"요약 카드 완성 (핵심 문장 {len(card['keypoints'])}개)")
+    return card
+
+
+def _from_cards(sentences, paper_ids):
+    """요약 카드의 핵심 문장(원문 확인됨)만 보고 근거를 찾는다 — 논문 전체(약 1만 토큰) 대신 카드(약 1천 토큰). 찾은 것만 돌려줌."""
+    kps = []
+    for pid in paper_ids[:2]:
+        c = get_card(pid)
+        if c:
+            kps += [k | {"pid": pid} for k in c.get("keypoints", [])]
+    if not kps or llm.engine() != "claude":
+        return {}
+    claims = "\n".join(f"{i + 1}. {t}" for i, t in enumerate(sentences))
+    cands = "\n".join(f"[{j + 1}] {k['claim']} / 원문: {k['quote']}" for j, k in enumerate(kps))
+    try:
+        res = llm.light(
+            f"[주장 문장들]\n{claims}\n\n[논문의 핵심 문장 후보]\n{cands}\n\n"
+            "주장 문장마다 그것을 뒷받침할 만한 후보를 가까운 순서로 1~2개 고르세요(n=주장 번호, ks=후보 번호들). 관련된 후보가 전혀 없으면 ks는 빈 배열. "
+            "주장이 연구 결과(실험·조사에서 나타났다)를 말하면 [결과] 후보를 먼저 고르세요. 고른 후보는 따로 다시 확인하니 너무 엄격하지 않아도 됩니다.",
+            system=SYS,
+            schema={"type": "object", "properties": {"items": {"type": "array", "items": {"type": "object", "properties": {"n": {"type": "integer"}, "ks": {"type": "array", "items": {"type": "integer"}}}, "required": ["n", "ks"]}}}, "required": ["items"]},
+        )
+    except Exception:
+        return {}
+    out, picks = {}, []
+    for it in res.get("items", []):
+        n = int(it.get("n") or 0) - 1
+        for k in (it.get("ks") or [])[:2]:
+            k = int(k or 0) - 1
+            if 0 <= n < len(sentences) and 0 <= k < len(kps):
+                picks.append((n, k))
+    # 카드로 고른 근거는 한 번 더 확인 (원문이 정말 그 말을 하는지) — 통과 못 하면 논문 전체를 읽어 다시 찾음
+    oks = verify_batch([(sentences[n], kps[k]["quote"]) for n, k in picks]) if picks else []
+    for (n, k), good in zip(picks, oks):
+        if good and sentences[n] not in out:  # 확인을 통과한 첫 후보
+            kp = kps[k]
+            row = db.q("SELECT p.title, p.authors, p.year FROM chunks c JOIN papers p ON p.id=c.paper_id WHERE c.id=?", (kp["chunk_id"],), one=True)
+            if row:
+                out[sentences[n]] = {"chunk_id": kp["chunk_id"], "quote": kp["quote"], "cite": pdfindex.cite_label(json.loads(row["authors"] or "[]"), row["year"]),
+                                     "title": row["title"], "reason": "요약 카드의 핵심 문장(확인됨)"}
+    return out
+
+
 def find_in_paper_many(sentences, paper_ids, log=None, max_chars=150000):
     """한 논문을 한 번만 읽고 여러 주장 문장의 근거를 한꺼번에 찾는다. 결과는 find_in_paper가 바로 꺼내 쓴다.
     (같은 논문을 5번 인용했으면 예전엔 5번 읽었지만 이제 1번)"""
     if llm.engine() != "claude" or not paper_ids or not sentences:
         return
     left = list(dict.fromkeys(s.strip() for s in sentences if s.strip()))
+    got = _from_cards(left, _distinct(paper_ids))
+    for t, h in got.items():
+        _prefetched[_pkey(t, paper_ids)] = h
+    if got and log:
+        log(f"   요약 카드로 {len(got)}문장의 근거를 찾음 (논문 전체를 다시 읽지 않음)")
+    left = [t for t in left if t not in got]
     for pid in _distinct(paper_ids):
         if not left:
             break
         rows, parts = _paper_parts(pid, max_chars)
         if not rows:
             continue
+        need_card = get_card(pid) is None
         for s0 in range(0, len(left), 12):  # 한 번에 12문장까지
             batch = left[s0 : s0 + 12]
             claims = "\n".join(f"{i + 1}. {t}" for i, t in enumerate(batch))
+            props = {"items": {"type": "array", "items": {"type": "object", "properties": {
+                "n": {"type": "integer"}, "chunk": {"type": "integer"}, "quote": {"type": "string"}, "reason": {"type": "string"}},
+                "required": ["n", "chunk", "quote", "reason"]}}}
+            if need_card:  # 어차피 전체를 읽는 김에 요약 카드도 함께 (다음부터는 카드로 찾음)
+                props["card"] = {"type": "object", "properties": CARD_PROPS, "required": list(CARD_PROPS)}
             try:
                 res = llm.light(
                     f"[주장 문장들]\n{claims}\n\n[논문 원문 — 조각마다 <c번호>]\n" + "\n".join(parts) + "\n\n"
                     "주장 문장마다, 위 논문에서 그 문장을 직접 뒷받침하는 부분을 찾으세요. n에 주장 번호, chunk에 조각 번호(숫자만), "
                     "quote에 원문을 글자 그대로(번역하지 말고) 10~40단어 복사하세요. 뒷받침하는 부분이 없으면 chunk를 0으로 하세요. "
-                    "비슷한 주제일 뿐 내용이 다르면 0입니다.",
+                    "비슷한 주제일 뿐 내용이 다르면 0입니다." + ("\n" + CARD_ASK if need_card else ""),
                     system=SYS,
-                    schema={"type": "object", "properties": {"items": {"type": "array", "items": {"type": "object", "properties": {
-                        "n": {"type": "integer"}, "chunk": {"type": "integer"}, "quote": {"type": "string"}, "reason": {"type": "string"}},
-                        "required": ["n", "chunk", "quote", "reason"]}}}, "required": ["items"]},
+                    schema={"type": "object", "properties": props, "required": list(props)},
                 )
             except Exception:
                 continue
+            if need_card and _save_card(pid, rows, res.get("card")):
+                need_card = False
             for it in res.get("items", []):
                 k = int(it.get("n") or 0) - 1
                 if 0 <= k < len(batch) and int(it.get("chunk") or 0):
@@ -544,6 +643,9 @@ def find_in_paper(sentence, paper_ids, max_chars=150000):
     key = _pkey(sentence, paper_ids)
     if key in _prefetched:  # 미리 한꺼번에 찾아 둔 결과
         return _prefetched.pop(key)
+    got = _from_cards([sentence.strip()], _distinct(paper_ids))  # 요약 카드가 있으면 카드부터 (훨씬 적게 읽음)
+    if got:
+        return next(iter(got.values()))
     for pid in _distinct(paper_ids):
         rows = db.q("SELECT c.id, c.page, c.text, p.title, p.authors, p.year FROM chunks c JOIN papers p ON p.id=c.paper_id WHERE c.paper_id=? ORDER BY c.page, c.id", (pid,))
         if not rows:

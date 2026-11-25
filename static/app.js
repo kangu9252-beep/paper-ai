@@ -66,6 +66,7 @@ async function loadEst(pid) {
 }
 function costTag(pid, key, mult = 1) {
   const e = S.est[pid];
+  if (key === "lint" || key === "refs") return `<span class="cost free" title="AI를 쓰지 않아요">무료</span>`;
   if (!e) return "";
   if (e.engine !== "claude") return `<span class="cost free" title="내 컴퓨터 로컬 AI로 해요">무료</span>`;
   if (e.sub) return `<span class="cost free" title="내 Claude 구독(Claude Code)으로 해요 — 추가 요금 없음, 구독 사용량 안에서">구독</span>`;
@@ -1102,7 +1103,7 @@ function paperTable(papers) {
     ${papers.map((p) => `<tr data-id="${p.id}"><td><b>${esc(p.cite)}</b></td><td>${esc(p.title)}
       ${p.status !== "ok" ? `<span class="badge warn">글자 없음(스캔본)</span>` : ""}</td><td>${p.pages || ""}</td>
       <td class="small muted">${p.source === "web" ? "인터넷" : "내 PC"}</td>
-      <td class="row" style="flex-wrap:nowrap"><button class="small" data-a="edit">수정</button><a class="small" href="/api/pdf/${p.id}" target="_blank">PDF</a>
+      <td class="row" style="flex-wrap:nowrap"><button class="small" data-a="card" title="논문 요약 카드">카드</button><button class="small" data-a="edit">수정</button><a class="small" href="/api/pdf/${p.id}" target="_blank">PDF</a>
       <button class="small ghost" data-a="del">빼기</button></td></tr>`).join("")}</table>`;
 }
 
@@ -1110,6 +1111,7 @@ function bindPaperTable(root, after) {
   $$("tr[data-id]", root).forEach((tr) => {
     const id = tr.dataset.id;
     $$("button", tr).forEach((b) => (b.onclick = async () => {
+      if (b.dataset.a === "card") return showCard(id);
       if (b.dataset.a === "del") {
         if (!confirm("이 자료를 목록에서 뺄까요? (PDF 파일은 지우지 않습니다)")) return;
         await api(`/api/papers/${id}`, { method: "DELETE" });
@@ -1127,6 +1129,38 @@ function bindPaperTable(root, after) {
       after();
     }));
   });
+}
+
+// 논문 요약 카드: 한 번 만들어 두면 다시 읽지 않아요 (근거 찾기도 카드부터)
+async function showCard(id) {
+  const d = document.createElement("dialog");
+  d.className = "wizard card-dlg";
+  document.body.appendChild(d);
+  const close = () => { d.close(); d.remove(); };
+  const draw = (card, msg = "") => {
+    d.innerHTML = card ? `<h3 style="margin:0 0 6px">📇 논문 요약 카드</h3>
+      <p class="small"><b>목적</b> ${esc(card.purpose)}</p><p class="small"><b>대상</b> ${esc(card.sample)}</p><p class="small"><b>방법</b> ${esc(card.method)}</p>
+      <div class="small"><b>주요 결과</b><ul>${(card.findings || []).map((x) => `<li>${esc(x)}</li>`).join("")}</ul></div>
+      <div class="small"><b>인용할 만한 핵심 문장</b> <span class="muted">(원문에서 확인된 문장만 · 쪽수)</span><ul>${(card.keypoints || []).map((k) => `<li>${esc(k.claim)} <span class="muted">— “${esc(k.quote.slice(0, 120))}” ${k.page ? `p.${k.page}` : ""}</span></li>`).join("")}</ul></div>
+      <p class="small muted">AI(Haiku)가 만든 요약이에요. 인용할 때는 원문을 꼭 확인하세요.</p>
+      <div class="row" style="justify-content:flex-end"><button class="ghost" id="cdRe">다시 만들기</button><button class="primary" id="cdX">닫기</button></div>`
+      : `<h3 style="margin:0 0 6px">📇 논문 요약 카드</h3><p class="small">아직 카드가 없어요. 논문을 한 번 읽어 목적·대상·방법·주요 결과·인용할 만한 핵심 문장(쪽수)을 정리해 둬요.
+      <br>한 번 만들어 두면 근거를 찾을 때 논문 전체를 다시 읽지 않아서 사용량이 줄어요. (인용 점검 중에 저절로 만들어지기도 해요)</p>
+      <p class="small muted" id="cdMsg">${esc(msg)}</p>
+      <div class="row" style="justify-content:flex-end"><button class="ghost" id="cdX">닫기</button><button class="primary" id="cdMake">카드 만들기</button></div>`;
+    $("#cdX", d).onclick = close;
+    const make = async () => {
+      const { job } = await api(`/api/papers/${id}/card`, { method: "POST" });
+      draw(null, "만드는 중… (30초~1분)");
+      $("#cdMake", d).disabled = true;
+      runJob(job, "논문 요약 카드", { onDone: (r, j) => (j.status === "done" && r ? draw(r) : draw(null, "만들지 못했어요: " + ((j.log || []).slice(-1)[0] || ""))) });
+    };
+    if ($("#cdMake", d)) $("#cdMake", d).onclick = make;
+    if ($("#cdRe", d)) $("#cdRe", d).onclick = make;
+  };
+  const { card } = await api(`/api/papers/${id}/card`);
+  draw(card);
+  d.showModal();
 }
 
 function formDialog(title, fields, okText = "저장") {
@@ -1615,6 +1649,8 @@ async function scheduleNight(kind, args) {
 }
 
 const TOOL_INFO = [
+  ["lint", "⓪ 무료 규칙 점검", "AI 없이 규칙만으로 1초 만에 봐요 — 참고문헌 순서·빠진 연도/쪽수·같은 저자 같은 해 a/b, et al. 표기, 표·그림 번호, 약어 첫 풀이, 너무 긴 문장, 같은 표현 반복, 연구문제 핵심어가 결론에 나오는지. 토큰 0이라 고칠 때마다 돌려도 돼요."],
+  ["polish", "⑦+⑧ 문장 다듬기 + AI 문체 한 번에", "아래 ⑦·⑧을 따로 돌리는 대신 원고를 한 번만 보내 함께 점검해요. 결과는 ⑦·⑧ 카드에 각각 채워지고, 토큰이 덜 들어요."],
   ["panel", "⓪ 심사위원 3인 모의 심사", "방법론 전문가·이론 전문가·지도교수형 심사위원 3명이 각자 심사한 뒤 서로 토론하고 최종 판정(통과/조건부 통과/수정 후 재심/불통과)을 내려요. 수정 요구마다 답변서를 쓰면 재심사를 받을 수 있어요. (Claude 3~5분 권장)"],
   ["structure", "⓪ 예비심사 리뷰", "지도교수·심사위원의 눈으로 읽어요 — 논문이 일목요연한지(연구문제 → 선행연구 → 방법 → 결과 → 결론이 한 줄기인지), 연구문제에 결론이 답하는지 보고, 심사에서 나올 비판과 고칠 점을 제안해요. 원고 옆에 💬 메모로도 달려요."],
   ["cites", "② 인용 전체 점검", "원고 속 (저자, 연도)를 모두 찾아 근거를 확인해요 — ✔ 확인 · ⚠ 원문과 다를 수 있음 · ? 근거 없음. 인용이 많으면 오래 걸려요."],
@@ -1649,6 +1685,13 @@ function reportHtml(k, rep) {
       <span class="badge rq-${it.label === "AI" ? "need" : "warn"}">${it.label} ${it.score}%</span> <span class="small muted">${esc(it.id)} · ${esc((it.patterns || []).join(", "))}</span>
       <div class="small">“${esc(it.sentence)}”</div><div class="small muted">${esc(it.reason)}</div>
       ${it.rewrite ? `<div class="small at-fix">✏ ${esc(it.rewrite)} <button class="small ghost" data-copy-fix="${esc(it.rewrite)}">복사</button></div>` : ""}</div>`).join("") || `<div class="rv-item ok">✔ AI처럼 보이는 문장이 없어요</div>`;
+  }
+  if (k === "lint" && Array.isArray(d)) {
+    const groups = {};
+    d.forEach((it) => (groups[it.kind] = groups[it.kind] || []).push(it));
+    h += Object.entries(groups).map(([kind, list]) => `<details class="small" ${list.length <= 3 ? "open" : ""}><summary><b>${esc(kind)}</b> ${list.length}곳</summary>
+      ${list.map((it) => `<div class="rv-item warn" ${it.para ? `data-para="${esc(it.para)}" style="cursor:pointer"` : ""}>${esc(it.msg)}${it.snip ? `<div class="muted">“${esc(it.snip)}”</div>` : ""}</div>`).join("")}</details>`).join("")
+      || `<div class="rv-item ok">✔ 규칙상 걸리는 곳이 없어요</div>`;
   }
   if (k === "style" && Array.isArray(d) && d.length) {
     h += d.map((it) => `<div class="rv-item warn" data-para="${esc(it.id)}" style="cursor:pointer"><span class="badge gray">${esc(it.category)}</span> <span class="small muted">${esc(it.id)}</span> “${esc(it.excerpt)}”
@@ -2308,7 +2351,7 @@ const JOB_TITLES = {
   ask: "내 자료에 묻기", explain: "쉽게 설명", model: "연구모형 그림", fetch: "논문 내려받기",
 };
 const REVIEW_TITLES = { structure: "뼈대 점검", cites: "인용 점검", uncited: "근거 없는 문장", discuss: "논의 보강", recent: "최신 연구",
-  refs: "참고문헌 대조", panel: "3인 모의 심사", panel_respond: "답변서 재심사", style: "문장 다듬기", aitone: "AI 문체 점검", full: "전체 검토" };
+  refs: "참고문헌 대조", lint: "무료 규칙 점검", polish: "문장·AI 문체 한 번에", panel: "3인 모의 심사", panel_respond: "답변서 재심사", style: "문장 다듬기", aitone: "AI 문체 점검", full: "전체 검토" };
 async function restoreJobs() {
   let list = [];
   try { list = await api("/api/jobs"); } catch { return; }
